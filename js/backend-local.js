@@ -4,19 +4,20 @@ import { DEFAULT_CATEGORIES } from './logic.js';
 const KEY = 'kakeibo-local-v1';
 const TABLES = ['members', 'categories', 'transactions', 'budgets', 'recurring', 'settlements', 'loans', 'goals', 'goal_deposits'];
 
-function load() {
+function load(key) {
   try {
-    return JSON.parse(localStorage.getItem(KEY)) || null;
+    return JSON.parse(localStorage.getItem(key)) || null;
   } catch {
     return null;
   }
 }
 
-export function createLocalBackend() {
-  let db = load();
+// key を変えると別の保存場所になる(動作確認で「クラウド役」を代用するときに使う)
+export function createLocalBackend(key = KEY) {
+  let db = load(key);
   // 後から増えたテーブルを、保存済みのデータにも足しておく
   if (db) for (const t of TABLES) db[t] ||= [];
-  const persist = () => localStorage.setItem(KEY, JSON.stringify(db));
+  const persist = () => localStorage.setItem(key, JSON.stringify(db));
   const uid = () => crypto.randomUUID();
 
   return {
@@ -69,6 +70,11 @@ export function createLocalBackend() {
       return row;
     },
 
+    async insertMany(table, rows) {
+      for (const row of rows) db[table].push({ ...row, id: uid(), created_at: new Date().toISOString() });
+      persist();
+    },
+
     async patch(table, id, fields) {
       const row = db[table].find((r) => r.id === id);
       if (row) Object.assign(row, fields);
@@ -119,7 +125,7 @@ export function createLocalBackend() {
     },
 
     async resetAll() {
-      localStorage.removeItem(KEY);
+      localStorage.removeItem(key);
       db = null;
     },
   };

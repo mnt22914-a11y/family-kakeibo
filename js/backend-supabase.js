@@ -108,6 +108,14 @@ export async function createSupabaseBackend(url, anonKey) {
       return check(await sb.from(table).upsert(payload).select().single());
     },
 
+    // まとめて追加(お試しデータの引き継ぎ用)
+    async insertMany(table, rows) {
+      for (let i = 0; i < rows.length; i += 500) {
+        const chunk = rows.slice(i, i + 500).map((r) => ({ ...r, household_id: household.id }));
+        check(await sb.from(table).insert(chunk));
+      }
+    },
+
     async patch(table, id, fields) {
       check(await sb.from(table).update(fields).eq('id', id));
     },

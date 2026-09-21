@@ -83,6 +83,9 @@ async function boot() {
   if (cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY) {
     const { createSupabaseBackend } = await import('./backend-supabase.js');
     backend = await createSupabaseBackend(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  } else if (new URLSearchParams(location.search).has('fakecloud')) {
+    // 動作確認用: クラウドの代わりに別の保存場所を使い、クラウドモードの画面(引き継ぎなど)を試す
+    backend = Object.assign(createLocalBackend('kakeibo-fakecloud-v1'), { mode: 'cloud', userEmail: () => 'test@example.com', signOut: async () => {} });
   } else {
     backend = createLocalBackend();
   }
@@ -1398,6 +1401,14 @@ function viewSettings() {
     <header class="page-head"><h1>設定</h1></header>
     ${cloud ? '' : '<p class="notice">お試しモード: データはこの端末のブラウザ内だけに保存されています。家族と共有するにはクラウド同期の設定が必要です(README 参照)。</p>'}
 
+    ${cloud && readTrialData() ? `
+      <section class="card">
+        <h2>お試しデータの引き継ぎ</h2>
+        <p class="muted small">この端末でお試しモードのときに入力したデータ(記録 ${readTrialData().transactions.length}件 など)が残っています。いまの家計に取り込めます。</p>
+        <button class="btn primary small" data-action="import-trial">この家計に取り込む</button>
+        <button class="link" data-action="discard-trial">取り込まずに消す</button>
+      </section>` : ''}
+
     <section class="card">
       <h2>${h(hh.name)}</h2>
       ${cloud ? `
@@ -1445,6 +1456,54 @@ function viewSettings() {
         ? `<p class="muted small">ログイン中: ${h(backend.userEmail())}</p><button class="btn small" data-action="signout">ログアウト</button>`
         : '<button class="btn small danger" data-action="reset-local">お試しデータをすべて消す</button>'}
     </section>`;
+}
+
+// ───────── お試しデータの引き継ぎ ─────────
+// お試しモード(この端末のブラウザ内)で入力したデータを、クラウドの家計へ写す
+
+const LOCAL_KEY = 'kakeibo-local-v1';
+
+function readTrialData() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LOCAL_KEY));
+    return raw && Array.isArray(raw.transactions) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+async function importTrialData() {
+  const raw = readTrialData();
+  if (!raw) return;
+  const idMap = new Map();
+  const ref = (id) => (id ? idMap.get(id) || null : null);
+  const strip = ({ id, created_at, household_id, ...rest }) => rest;
+
+  // メンバーとカテゴリは、同じ名前があればそれに合わせ、なければ作る
+  for (const m of raw.members || []) {
+    const hit = state.members.find((x) => x.name === m.name) || (m.user_id === 'local' ? byId(state.members, state.myMemberId) : null);
+    idMap.set(m.id, (hit || await backend.save('members', { name: m.name, in_settlement: m.in_settlement, sort: m.sort ?? 0, user_id: null })).id);
+  }
+  for (const c of raw.categories || []) {
+    const hit = state.categories.find((x) => x.kind === c.kind && x.name === c.name);
+    idMap.set(c.id, (hit || await backend.save('categories', { kind: c.kind, name: c.name, icon: c.icon, sort: c.sort ?? 0, archived: Boolean(c.archived) })).id);
+  }
+  for (const r of raw.recurring || []) {
+    const saved = await backend.save('recurring', { ...strip(r), every: r.every || 'month', month_of_year: r.month_of_year ?? null, category_id: ref(r.category_id), member_id: ref(r.member_id) });
+    idMap.set(r.id, saved.id);
+  }
+  for (const g of raw.goals || []) idMap.set(g.id, (await backend.save('goals', strip(g))).id);
+
+  await backend.insertMany('transactions', (raw.transactions || []).map((t) => ({ ...strip(t), category_id: ref(t.category_id), member_id: ref(t.member_id), recurring_id: ref(t.recurring_id) })));
+  const budgeted = new Set(state.budgets.map((b) => b.category_id));
+  await backend.insertMany('budgets', (raw.budgets || []).map((b) => ({ category_id: ref(b.category_id), amount: b.amount })).filter((b) => b.category_id && !budgeted.has(b.category_id)));
+  await backend.insertMany('settlements', (raw.settlements || []).map((x) => ({ ...strip(x), from_member: ref(x.from_member), to_member: ref(x.to_member) })).filter((x) => x.from_member && x.to_member));
+  await backend.insertMany('loans', (raw.loans || []).map((l) => ({ ...strip(l), member_id: ref(l.member_id), counterparty_member_id: ref(l.counterparty_member_id) })));
+  await backend.insertMany('goal_deposits', (raw.goal_deposits || []).map((d) => ({ ...strip(d), goal_id: ref(d.goal_id), member_id: ref(d.member_id) })).filter((d) => d.goal_id));
+
+  // 二重に取り込まないよう、取り込み済みの印を付けて退避する
+  localStorage.setItem(`${LOCAL_KEY}-imported`, localStorage.getItem(LOCAL_KEY));
+  localStorage.removeItem(LOCAL_KEY);
 }
 
 // ───────── 入力シート ─────────
@@ -1704,6 +1763,17 @@ const actions = {
     if (!confirm('この精算記録を削除しますか?')) return;
     await guard(() => backend.remove('settlements', d.id));
     await reload('削除しました');
+  },
+  'import-trial': async () => {
+    if (!confirm('お試しモードのデータを、いまの家計に取り込みます。よろしいですか?')) return;
+    toast('取り込んでいます…');
+    const ok = await guard(async () => { await importTrialData(); return true; });
+    await reload(ok ? '✓ 取り込みました' : undefined);
+  },
+  'discard-trial': () => {
+    if (!confirm('この端末に残っているお試しデータを消します。元に戻せません。よろしいですか?')) return;
+    localStorage.removeItem(LOCAL_KEY);
+    render();
   },
   'settle-mode': (d) => { state.settleMode = d.mode; render(); },
   'edit-loan': (d) => openLoanSheet(d.id),

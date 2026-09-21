@@ -108,6 +108,12 @@ export function createLocalBackend(key = KEY) {
       persist();
     },
 
+    async clearAllSplits() {
+      for (const t of [...db.transactions, ...db.recurring]) t.shared = false;
+      db.settlements = [];
+      persist();
+    },
+
     async sharedPaidTotals() {
       const totals = {};
       for (const t of db.transactions) {

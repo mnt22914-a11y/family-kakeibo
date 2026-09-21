@@ -452,7 +452,7 @@ function openCategoryPicker(kind, amount) {
       <div class="sheet-body">
         ${presets.length ? `<div class="chips">${presets.map((p, i) => `<button class="chip" data-preset="${i}">${category(p.category_id).icon} ${h(p.memo)}</button>`).join('')}</div>` : ''}
         <div class="tiles">${cats.map((c, i) => `<button class="tile" style="--i:${i}" data-cat="${c.id}"><span>${c.icon}</span>${h(c.name)}</button>`).join('')}</div>
-        <p class="muted small picker-note">タップするとすぐ保存します(今日・${h(memberName(state.myMemberId))})</p>
+        <p class="muted small picker-note">タップするとすぐ保存します(今日・${h(memberName(state.myMemberId))})。分割したいときは、保存後の「分割」を押します</p>
       </div>
     </div>`;
   const close = () => { $sheetRoot.innerHTML = ''; };
@@ -467,7 +467,7 @@ function openCategoryPicker(kind, amount) {
       kind, amount, date: today(), member_id: state.myMemberId, recurring_id: null,
       category_id: preset ? preset.category_id : tile.dataset.cat,
       memo: preset ? preset.memo : '',
-      shared: kind === 'expense' ? (preset ? preset.shared : true) : false,
+      shared: false, // 分割は必要なときだけ、あとから「分割」で指定する
     };
     const fromRect = (tile || chip).getBoundingClientRect();
     const saved = await guard(() => backend.save('transactions', row));
@@ -486,6 +486,9 @@ function openCategoryPicker(kind, amount) {
     $app.querySelector('.quick-context')?.classList.add('bump');
     toast(`${c.icon} ${row.memo || c.name} ${yen(amount)} を記録`, [
       { label: '取り消す', run: async () => { await guard(() => backend.remove('transactions', saved.id)); await reload('取り消しました'); } },
+      ...(kind === 'expense' && splitMembers().length >= 2
+        ? [{ label: '分割', run: async () => { await guard(() => backend.patch('transactions', saved.id, { shared: true })); await reload(`👥 ${splitMembers().length}人で分割にしました`); } }]
+        : []),
       { label: '詳細', run: () => openTxSheet(saved.id) },
     ]);
   });
@@ -1103,7 +1106,7 @@ function txRow(t, showDate = false) {
   const tags = [
     showDate === true ? shortDate(t.date) : '',
     t.member_id ? `<span class="dot" style="background:var(--series-${memberSlot(t.member_id)})"></span>${h(memberName(t.member_id))}` : '',
-    t.kind === 'expense' && !t.shared ? '<span class="tag">個人</span>' : '',
+    t.kind === 'expense' && t.shared ? '<span class="tag split">分割</span>' : '',
     t.recurring_id ? '<span class="tag">固定</span>' : '',
   ].filter(Boolean).join(' ');
   return `
@@ -1404,13 +1407,31 @@ function viewSplit() {
       <button class="icon-btn" data-action="delete-settle" data-id="${s.id}" aria-label="この精算記録を削除">🗑</button>
     </li>`).join('');
 
+  const splitList = state.tx.filter((t) => t.kind === 'expense' && t.shared);
+  const splitRows = splitList.slice(0, 30).map((t) => txRow(t, true)).join('');
+
+  if (!result.total && !state.settlements.length) {
+    return `
+      <section class="card hint">
+        <h2>分割した支出はまだありません</h2>
+        <p class="muted">支出は、そのままでは精算に入りません。割り勘にしたい支出だけ、入力のときに <b>「👥 メンバーで分割」</b> を押してください(スワイプ入力のあとは、上に出る通知の「分割」)。</p>
+        <p class="muted small">あとから分割にしたいときは、「履歴」でその支出を開いて「メンバーで分割」を押します。</p>
+      </section>`;
+  }
+
   return `
     <section class="card"><h2>いま渡す金額</h2>${transfers}</section>
     <section class="card">
       <h2>内訳(これまでの合計)</h2>
-      <p class="muted small">「家族共通」の支出 ${yen(result.total)} を ${result.balances.length}人で均等に割っています(1人あたり ${yen(result.share)})。</p>
+      <p class="muted small">「メンバーで分割」にした支出 ${yen(result.total)} を ${result.balances.length}人で均等に割っています(1人あたり ${yen(result.share)})。</p>
       ${balances}
     </section>
+    ${splitRows ? `
+      <details class="fold card"><summary>分割した支出を見る(直近6か月・${splitList.length}件)</summary>
+        <p class="muted small">タップして開くと、分割をやめられます。</p>
+        <ul class="tx-list">${splitRows}</ul>
+        <button class="btn small danger" data-action="clear-splits">すべて解除して、精算をゼロに戻す</button>
+      </details>` : ''}
     ${history ? `<section class="card"><h2>精算の記録</h2><ul class="tx-list">${history}</ul></section>` : ''}`;
 }
 
@@ -1575,7 +1596,9 @@ const catOptions = (kind, keepId) => state.categories
   .map((c) => ({ id: c.id, label: `${c.icon} ${h(c.name)}` }));
 const memberOptions = () => state.members.map((m) => ({ id: m.id, label: h(m.name) }));
 
-// 支出/収入の切り替え・カテゴリ・支払った人・共通かどうか(取引と固定費で共用)
+const splitMembers = () => state.members.filter((m) => m.in_settlement);
+
+// 支出/収入の切り替え・カテゴリ・支払った人・メンバーで分割するか(取引と固定費で共用)
 function entryFields(v) {
   return `
     <div class="segmented">
@@ -1587,7 +1610,11 @@ function entryFields(v) {
     <div class="field only-expense"><span class="field-label">カテゴリ</span>${radioChips('category_expense', catOptions('expense', v.category_id), v.category_id)}</div>
     <div class="field only-income"><span class="field-label">カテゴリ</span>${radioChips('category_income', catOptions('income', v.category_id), v.category_id)}</div>
     <div class="field"><span class="field-label"><span class="only-expense">支払った人</span><span class="only-income">受け取った人</span></span>${radioChips('member_id', memberOptions(), v.member_id)}</div>
-    <label class="check only-expense"><input type="checkbox" name="shared" ${v.shared ? 'checked' : ''}><span>家族共通の支出(精算の対象にする)</span></label>`;
+    ${splitMembers().length >= 2 ? `
+    <div class="field only-expense">
+      <label class="split-toggle"><input type="checkbox" name="shared" ${v.shared ? 'checked' : ''}><span>👥 メンバーで分割</span></label>
+      <p class="split-note">${splitMembers().map((m) => h(m.name)).join('・')} の${splitMembers().length}人で割って、「精算」に入れます。</p>
+    </div>` : ''}`;
 }
 
 function bindKind(form) {
@@ -1617,7 +1644,7 @@ function readEntry(f) {
 
 function openTxSheet(id, defaults = {}) {
   const t = id ? byId(state.tx, id) : null;
-  const v = t || { kind: 'expense', date: today(), member_id: state.myMemberId, shared: true, memo: '', ...defaults };
+  const v = t || { kind: 'expense', date: today(), member_id: state.myMemberId, shared: false, memo: '', ...defaults };
   const presets = t ? [] : quickPresets(state.tx).filter((p) => byId(state.categories, p.category_id) && !category(p.category_id).archived);
   const yesterday = toDateStr(new Date(Date.now() - 86400000));
   const presetHtml = presets.length ? `
@@ -1657,7 +1684,6 @@ function openTxSheet(id, defaults = {}) {
     form.querySelector(`[name=kind][value=${p.kind}]`).checked = true;
     const radio = [...form.querySelectorAll(`[name=category_${p.kind}]`)].find((r) => r.value === p.category_id);
     if (radio) radio.checked = true;
-    form.querySelector('[name=shared]').checked = p.shared;
     form.querySelector('[name=memo]').value = p.memo;
     amountInput.value = p.amount;
     form.dispatchEvent(new Event('change'));
@@ -1670,7 +1696,7 @@ let lastEntry = {};
 
 function openRecurringSheet(id) {
   const r = id ? byId(state.recurring, id) : null;
-  const v = r || { kind: 'expense', member_id: state.myMemberId, shared: true, day: 1, name: '', active: true };
+  const v = r || { kind: 'expense', member_id: state.myMemberId, shared: false, day: 1, name: '', active: true };
   const repeat = r ? (isOnce(r) ? 'once' : r.every === 'year' ? 'year' : 'month') : 'month';
   // カレンダーで選んでいる日付。既存の予定は、その予定の「次に来る日」あたりを最初に見せる
   const pad = (n) => String(n).padStart(2, '0');
@@ -1851,6 +1877,11 @@ const actions = {
     localStorage.removeItem(LOCAL_KEY);
     render();
   },
+  'clear-splits': async () => {
+    if (!confirm('精算をゼロから始め直します。\n\n・これまでに「メンバーで分割」にした支出を、すべて「分割しない」に戻します(支払い予定の分も含みます)\n・「渡したら記録」で付けた精算の記録も消します\n\n支出そのものは消えません。よろしいですか?')) return;
+    await guard(() => backend.clearAllSplits());
+    await reload('精算をゼロに戻しました');
+  },
   'settle-mode': (d) => { state.settleMode = d.mode; render(); },
   'edit-loan': (d) => openLoanSheet(d.id),
   'repay-loan': (d) => openRepaySheet(d.id),
@@ -1882,7 +1913,7 @@ const actions = {
     const rows = [['日付', '種類', 'カテゴリ', '金額', '支払った人', '区分', 'メモ']];
     for (const t of all) {
       rows.push([t.date, t.kind === 'income' ? '収入' : '支出', category(t.category_id).name, t.amount,
-        t.member_id ? memberName(t.member_id) : '', t.kind === 'expense' ? (t.shared ? '家族共通' : '個人') : '', t.memo]);
+        t.member_id ? memberName(t.member_id) : '', t.kind === 'expense' && t.shared ? 'メンバーで分割' : '', t.memo]);
     }
     const blob = new Blob(['﻿' + toCsv(rows)], { type: 'text/csv' });
     const a = document.createElement('a');

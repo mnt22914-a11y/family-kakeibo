@@ -134,9 +134,9 @@ export function summarize(transactions) {
 
 // 精算の計算。
 //  members: [{id, in_settlement}]
-//  paidTotals: {member_id: 家族共通の支出として払った合計}
+//  paidTotals: {member_id: 「メンバーで分割」にした支出として払った合計}
 //  settlements: [{from_member, to_member, amount}]
-// 共通の支出は精算対象メンバーで均等割り。
+// 分割にした支出は、精算対象メンバーで均等割り。
 // 戻り値: { total, share, balances: [{member_id, paid, balance}], transfers: [{from, to, amount}] }
 //  balance > 0 は「もらう側」、< 0 は「払う側」
 export function computeSettlement(members, paidTotals, settlements) {

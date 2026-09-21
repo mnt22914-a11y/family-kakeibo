@@ -147,6 +147,13 @@ export async function createSupabaseBackend(url, anonKey) {
       check(await sb.from('transactions').upsert(payload, { onConflict: 'recurring_id,date', ignoreDuplicates: true }));
     },
 
+    // 「メンバーで分割」をすべて解除し、精算をゼロから始め直す(渡したお金の記録も消す)
+    async clearAllSplits() {
+      check(await sb.from('transactions').update({ shared: false }).eq('household_id', household.id).eq('shared', true));
+      check(await sb.from('recurring').update({ shared: false }).eq('household_id', household.id).eq('shared', true));
+      check(await sb.from('settlements').delete().eq('household_id', household.id));
+    },
+
     async sharedPaidTotals() {
       const rows = check(await sb.rpc('shared_paid_totals', { p_household: household.id }));
       const totals = {};

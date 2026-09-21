@@ -95,6 +95,7 @@ async function boot() {
 async function route(status) {
   $tabbar.hidden = true;
   if (status === 'needs-auth') return renderAuth();
+  if (status === 'offline') return renderOffline();
   if (status === 'needs-household') return renderSetup();
   await startMain();
 }
@@ -168,23 +169,45 @@ async function reload(message) {
 
 // ───────── ログイン・初期設定 ─────────
 
+function renderOffline() {
+  $app.innerHTML = `
+    <section class="center-card">
+      <div class="logo">📡</div>
+      <h1>オフラインです</h1>
+      <p class="muted">ログインはそのまま保たれています。電波のあるところで、もう一度開いてください。</p>
+      <button class="btn primary" onclick="location.reload()">もう一度試す</button>
+    </section>`;
+  window.addEventListener('online', () => location.reload(), { once: true });
+}
+
+const LAST_EMAIL_KEY = 'kakeibo-last-email';
+
 function renderAuth() {
   $app.innerHTML = `
     <section class="center-card">
       <div class="logo">👛</div>
       <h1>家族の家計簿</h1>
-      <p class="muted">家族それぞれが自分のメールアドレスで登録します。</p>
+      <p class="muted">家族それぞれが自分のメールアドレスで登録します。一度ログインすれば、この端末では次回から自動で開きます。</p>
       <form id="auth-form" class="form">
-        <label>メールアドレス<input name="email" type="email" autocomplete="email" required></label>
+        <label>メールアドレス<input name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" value="${h(localStorage.getItem(LAST_EMAIL_KEY) || '')}" required></label>
         <label>パスワード(6文字以上)<input name="password" type="password" autocomplete="current-password" minlength="6" required></label>
         <button class="btn primary" name="mode" value="signin">ログイン</button>
         <button class="btn" name="mode" value="signup">はじめての方: 新規登録</button>
       </form>
+      <details class="fold auth-help">
+        <summary>毎回ログイン画面が出るときは</summary>
+        <ul>
+          <li><b>ホーム画面のアイコンから開く</b>ときは、アイコンから開いた画面で一度ログインしてください(Safari でのログインとは別に記憶されます)。</li>
+          <li><b>プライベートブラウズ(シークレットモード)</b>では、閉じるたびにログインが消えます。ふつうのタブで開いてください。</li>
+          <li><b>LINE などのアプリの中で開いた画面</b>では記憶されないことがあります。Safari や Chrome で開き直してください。</li>
+        </ul>
+      </details>
     </section>`;
   document.getElementById('auth-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
     const mode = e.submitter?.value || 'signin';
+    try { localStorage.setItem(LAST_EMAIL_KEY, f.get('email')); } catch { /* 覚えられなくても支障なし */ }
     guard(async () => {
       if (mode === 'signup') {
         const result = await backend.signUp(f.get('email'), f.get('password'));

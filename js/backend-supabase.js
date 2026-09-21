@@ -16,6 +16,11 @@ function jaError(error) {
   return new Error(msg);
 }
 
+// ブラウザに「このサイトの保存データを勝手に消さないで」と頼む(ログイン状態が消えにくくなる)
+function keepStorage() {
+  navigator.storage?.persist?.().catch(() => {});
+}
+
 export async function createSupabaseBackend(url, anonKey) {
   const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
   const sb = createClient(url, anonKey);
@@ -44,8 +49,18 @@ export async function createSupabaseBackend(url, anonKey) {
     async init() {
       const { data } = await sb.auth.getSession();
       user = data.session?.user || null;
-      if (!user) return 'needs-auth';
-      return (await loadMembership()) ? 'ready' : 'needs-household';
+      if (!user) {
+        // ログイン情報は残っているのに電波がなくて確認できないだけなら、ログイン画面には戻さない
+        const remembered = Object.keys(localStorage).some((k) => k.startsWith('sb-') && k.endsWith('-auth-token'));
+        return remembered && !navigator.onLine ? 'offline' : 'needs-auth';
+      }
+      keepStorage();
+      try {
+        return (await loadMembership()) ? 'ready' : 'needs-household';
+      } catch (e) {
+        if (!navigator.onLine) return 'offline';
+        throw e;
+      }
     },
 
     userEmail() {
@@ -56,12 +71,14 @@ export async function createSupabaseBackend(url, anonKey) {
       const data = check(await sb.auth.signUp({ email, password }));
       if (!data.session) return 'confirm-email';
       user = data.user;
+      keepStorage();
       return 'ok';
     },
 
     async signIn(email, password) {
       const data = check(await sb.auth.signInWithPassword({ email, password }));
       user = data.user;
+      keepStorage();
     },
 
     async signOut() {

@@ -348,6 +348,10 @@ form[data-kind="expense"] .only-income, form[data-kind="income"] .only-expense {
 .center-card h1 { text-align: center; font-size: 24px; margin-bottom: 8px; }
 .center-card > .muted { text-align: center; margin-bottom: 20px; }
 .center-card .form { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin-bottom: 16px; display: flex; flex-direction: column; }
+.auth-help { font-size: 13px; color: var(--text-2); }
+.auth-help ul { margin: 0; padding-left: 18px; }
+.auth-help li { margin-bottom: 8px; }
+.auth-help b { color: var(--text); }
 .center-card .form .btn { margin-top: 4px; margin-bottom: 8px; }
 
 /* タブバー */

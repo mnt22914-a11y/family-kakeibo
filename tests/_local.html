@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><script>
+  // 動作確認用: クラウド設定を使わず、お試しモードでアプリを開く
+  fetch('../index.html').then(r => r.text()).then(t => { document.open(); document.write(t.replace('<script src="js/config.js"><\/script>', '<script>window.KAKEIBO_CONFIG={}<\/script>').replace('<head>', '<head><base href="../">')); document.close(); });
+</script>

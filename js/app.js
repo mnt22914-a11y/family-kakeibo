@@ -1672,8 +1672,15 @@ function openRecurringSheet(id) {
   const r = id ? byId(state.recurring, id) : null;
   const v = r || { kind: 'expense', member_id: state.myMemberId, shared: true, day: 1, name: '', active: true };
   const repeat = r ? (isOnce(r) ? 'once' : r.every === 'year' ? 'year' : 'month') : 'month';
-  const now = new Date();
-  const onceDate = r && isOnce(r) ? `${r.start_month}-${String(Math.min(r.day, daysInMonth(r.start_month))).padStart(2, '0')}` : today();
+  // カレンダーで選んでいる日付。既存の予定は、その予定の「次に来る日」あたりを最初に見せる
+  const pad = (n) => String(n).padStart(2, '0');
+  const thisYear = today().slice(0, 4);
+  let picked = today();
+  if (r && isOnce(r)) picked = `${r.start_month}-${pad(Math.min(r.day, daysInMonth(r.start_month)))}`;
+  else if (r && r.every === 'year') picked = `${thisYear}-${pad(r.month_of_year)}-${pad(Math.min(r.day, daysInMonth(`${thisYear}-${pad(r.month_of_year)}`)))}`;
+  else if (r) picked = `${monthOf(today())}-${pad(Math.min(r.day, daysInMonth(monthOf(today()))))}`;
+  let monthEnd = Boolean(r) && !isOnce(r) && r.every !== 'year' && r.day === 31;
+  let viewMonth = monthOf(picked);
   const seg = (value, label) => `<label><input type="radio" name="repeat" value="${value}" ${repeat === value ? 'checked' : ''}><span>${label}</span></label>`;
   const form = openSheet(r ? '予定を編集' : '予定を追加', `
     <label>名前<input name="name" value="${h(v.name)}" required maxlength="40" placeholder="例: 家賃、動画サブスク、自動車税"></label>
@@ -1681,10 +1688,11 @@ function openRecurringSheet(id) {
       ...v,
       extraTop: `
         <div class="field"><span class="field-label">くり返し</span><div class="segmented three">${seg('month', '毎月')}${seg('year', '毎年')}${seg('once', '1回だけ')}</div></div>
-        <div class="row-fields">
-          <label class="only-year">何月<input name="month_of_year" type="number" min="1" max="12" value="${v.month_of_year || now.getMonth() + 1}"></label>
-          <label class="only-month only-year">何日<input name="day" type="number" min="1" max="31" value="${v.day}"></label>
-          <label class="only-once">日付<input name="once_date" type="date" value="${onceDate}"></label>
+        <div class="field">
+          <span class="field-label">日付をカレンダーから選ぶ</span>
+          <div class="cal" data-cal></div>
+          <p class="cal-summary" data-cal-summary aria-live="polite"></p>
+          <label class="check only-month-mode"><input type="checkbox" name="month_end" ${monthEnd ? 'checked' : ''}><span>毎月の「月末」にする(30日までの月は30日、2月は28日か29日)</span></label>
         </div>`,
     })}
     <label class="check"><input type="checkbox" name="active" ${v.active ? 'checked' : ''}><span>有効(オフにすると自動記録を止めます)</span></label>
@@ -1693,18 +1701,16 @@ function openRecurringSheet(id) {
       const name = f.get('name').trim();
       if (!name) throw new Error('名前を入力してください');
       const mode = f.get('repeat');
-      const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, parseInt(n, 10) || lo));
       const thisMonth = monthOf(today());
       const row = { ...readEntry(f), name, active: f.get('active') === 'on', every: 'month', month_of_year: null, end_month: null };
       // 1回だけ→くり返しに変えたときは、今月から数え直す
       const start = r && !isOnce(r) ? r.start_month : thisMonth;
       if (mode === 'once') {
-        const date = f.get('once_date');
-        if (!date) throw new Error('日付を入力してください');
-        Object.assign(row, { day: Number(date.slice(8)), start_month: monthOf(date), end_month: monthOf(date) });
+        Object.assign(row, { day: Number(picked.slice(8)), start_month: monthOf(picked), end_month: monthOf(picked) });
+      } else if (mode === 'year') {
+        Object.assign(row, { day: Number(picked.slice(8)), start_month: start, every: 'year', month_of_year: Number(picked.slice(5, 7)) });
       } else {
-        Object.assign(row, { day: clamp(f.get('day'), 1, 31), start_month: start });
-        if (mode === 'year') Object.assign(row, { every: 'year', month_of_year: clamp(f.get('month_of_year'), 1, 12) });
+        Object.assign(row, { day: f.get('month_end') === 'on' ? 31 : Number(picked.slice(8)), start_month: start });
       }
       row.last_generated = r && r.start_month === row.start_month ? r.last_generated ?? null : null;
       if (r) row.id = r.id;
@@ -1715,6 +1721,53 @@ function openRecurringSheet(id) {
     onDelete: r ? async () => { await backend.remove('recurring', r.id); await reload('削除しました(過去の記録は残ります)'); } : null,
   });
   bindKind(form);
+
+  // カレンダー。毎月なら「その日」が毎月、毎年なら「その月日」、1回だけならその日だけに印が付く
+  const $cal = form.querySelector('[data-cal]');
+  const $summary = form.querySelector('[data-cal-summary]');
+  const drawCalendar = () => {
+    const mode = new FormData(form).get('repeat');
+    monthEnd = form.querySelector('[name=month_end]').checked;
+    const [y, m] = viewMonth.split('-').map(Number);
+    const dim = daysInMonth(viewMonth);
+    const lead = new Date(y, m - 1, 1).getDay();
+    const pDay = Number(picked.slice(8));
+    const isMarked = (d) => {
+      if (mode === 'once') return picked === `${viewMonth}-${pad(d)}`;
+      if (mode === 'year') return picked.slice(5) === `${pad(m)}-${pad(d)}`;
+      return monthEnd ? d === dim : d === Math.min(pDay, dim);
+    };
+    const cells = Array.from({ length: lead }, () => '<span></span>')
+      .concat(Array.from({ length: dim }, (_, i) => {
+        const d = i + 1;
+        const date = `${viewMonth}-${pad(d)}`;
+        return `<button type="button" class="cal-day ${isMarked(d) ? 'on' : ''} ${date === today() ? 'today' : ''}" data-date="${date}" aria-pressed="${isMarked(d)}" aria-label="${m}月${d}日">${d}</button>`;
+      })).join('');
+    $cal.innerHTML = `
+      <div class="cal-head">
+        <button type="button" data-cal-nav="-1" aria-label="前の月">‹</button>
+        <b>${monthLabel(viewMonth)}</b>
+        <button type="button" data-cal-nav="1" aria-label="次の月">›</button>
+      </div>
+      <div class="cal-week">${[...WEEK].map((w, i) => `<span class="${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${w}</span>`).join('')}</div>
+      <div class="cal-grid">${cells}</div>`;
+    const [py, pm, pd] = picked.split('-').map(Number);
+    $summary.innerHTML = mode === 'once' ? `<b>${py}年${pm}月${pd}日</b> に1回だけ記録します`
+      : mode === 'year' ? `<b>毎年 ${pm}月${pd}日</b> に記録します`
+      : monthEnd ? '<b>毎月 月末</b> に記録します' : `<b>毎月 ${pd}日</b> に記録します${pd > 28 ? '(その日がない月は月末)' : ''}`;
+  };
+  $cal.addEventListener('click', (e) => {
+    const nav = e.target.closest('[data-cal-nav]');
+    const day = e.target.closest('[data-date]');
+    if (nav) viewMonth = addMonths(viewMonth, Number(nav.dataset.calNav));
+    if (day) {
+      picked = day.dataset.date;
+      form.querySelector('[name=month_end]').checked = false; // 日付を選び直したら「月末」は外す
+    }
+    if (nav || day) drawCalendar();
+  });
+  form.addEventListener('change', (e) => { if (['repeat', 'month_end'].includes(e.target.name)) drawCalendar(); });
+  drawCalendar();
 }
 
 function openMemberSheet(id) {

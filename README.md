@@ -94,11 +94,12 @@ python3 -m http.server 8000
    - Database Password は控えておく(このアプリでは使いません)
 2. 左メニューの **SQL Editor** を開き、`supabase/schema.sql` の中身を全部貼り付けて **Run** を押す
    - 「Success. No rows returned」と出れば成功
-3. 左メニューの **Authentication → Sign In / Providers → Email** で **Confirm email** をオフにして保存する
+3. 左メニューの **Authentication → Sign In / Providers** を開き、ページいちばん上の **User Signups** の枠にある **Confirm email** をオフにして **Save changes** を押す
    - オンのままだと、登録時に確認メールのリンクを開く手間が増えます(家族だけで使うならオフで十分です)
-4. **Project Settings → API**(または Data API / API Keys)で次の2つをコピーする
-   - Project URL(`https://xxxx.supabase.co`)
-   - anon public キー(または publishable キー)
+   - **Email** の行の中にある **Enable Email provider** はオンのままにする(オフにすると登録できなくなります)
+4. **Project Settings** で次の2つをコピーする
+   - **Data API** の Project URL(`https://xxxx.supabase.co`)
+   - **API Keys** の Publishable key(`sb_publishable_...`)。Legacy API Keys タブの anon public キーでも可
 5. `js/config.js` に貼り付ける
 
 ```js

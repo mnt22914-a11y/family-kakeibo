@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>スマホ幅プレビュー(動作確認用)</title>
+<style>body{margin:0;background:#888}iframe{display:block;border:0;width:375px;height:100vh;background:#fff}</style>
+<iframe id="f"></iframe>
+<script>
+  // tests/frame.html?seed#history → サンプルデータを入れてから、375px幅で指定タブを表示
+  const f = document.getElementById('f');
+  f.src = (location.search.includes('seed') ? 'seed.html' : '../index.html') + location.hash;
+
+  // ?swipe=half … カードを左に半分引いた状態 / ?swipe=pick … 1280円を打って左スワイプ(カテゴリ選択を表示)
+  // ?swipe=done … さらに先頭のカテゴリをタップして保存
+  const swipeMode = new URLSearchParams(location.search).get('swipe');
+  if (swipeMode) (async () => {
+    let doc;
+    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); doc = f.contentDocument; if (doc?.querySelector('.swipe-card')) break; }
+    const win = f.contentWindow;
+    for (const k of ['1', '2', '8', '0']) doc.querySelector(`[data-k="${k}"]`).click();
+    const card = doc.querySelector('.swipe-card');
+    const fire = (type, x) => card.dispatchEvent(new win.PointerEvent(type, { bubbles: true, clientX: x, clientY: 200, pointerId: 1 }));
+    fire('pointerdown', 200);
+    fire('pointermove', swipeMode === 'half' ? 125 : 90);
+    if (swipeMode === 'half') return;
+    fire('pointerup', 90);
+    await new Promise((r) => setTimeout(r, 300));
+    if (swipeMode !== 'done') return;
+    const before = JSON.parse(win.localStorage.getItem('kakeibo-local-v1')).transactions.length;
+    const tile = doc.querySelector('.tile');
+    const label = tile.textContent;
+    tile.click();
+    await new Promise((r) => setTimeout(r, 1800));
+    const db = JSON.parse(win.localStorage.getItem('kakeibo-local-v1'));
+    const last = db.transactions[db.transactions.length - 1];
+    document.body.insertAdjacentHTML('beforeend', '<pre id="out" style="position:fixed;right:0;top:0;width:120px;white-space:pre-wrap;font-size:9px;background:#fff">' + JSON.stringify({ tile: label, added: db.transactions.length - before, kind: last.kind, amount: last.amount, shared: last.shared, pickerClosed: !doc.querySelector('.picker'), amountReset: doc.querySelector('.swipe-amount').textContent, toast: doc.getElementById('toast').textContent, cardEntered: doc.querySelector('.swipe-card').classList.contains('enter'), leftoverParticles: doc.querySelectorAll('.particle').length }) + '</pre>');
+  })();
+
+  // ?click=セレクタ(カンマ区切りで順に) … 表示後にその要素をクリックする
+  const clicks = new URLSearchParams(location.search).get('click');
+  if (clicks) (async () => {
+    let doc;
+    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); doc = f.contentDocument; if (doc?.querySelector('#tabbar:not([hidden])')) break; }
+    for (const sel of clicks.split(',')) { doc.querySelector(sel)?.click(); await new Promise((r) => setTimeout(r, 200)); }
+  })();
+
+  // ?tapbubble … まとめの一番大きい泡をタップ(明細を開く)。?dragbubble … 泡をつかんで右へ動かす
+  if (/tapbubble|dragbubble/.test(location.search)) (async () => {
+    let doc;
+    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 100)); doc = f.contentDocument; if (doc?.querySelector('.bubble-field.ready')) break; }
+    await new Promise((r) => setTimeout(r, 300));
+    const win = f.contentWindow;
+    const el = doc.querySelector('.bubble');
+    const box = el.getBoundingClientRect();
+    const fire = (type, x, y) => el.dispatchEvent(new win.PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerId: 1 }));
+    const x = box.left + box.width / 2, y = box.top + box.height / 2;
+    fire('pointerdown', x, y);
+    if (location.search.includes('dragbubble')) { for (let i = 1; i <= 10; i++) { fire('pointermove', x + i * 9, y - i * 3); await new Promise((r) => setTimeout(r, 30)); } return; }
+    fire('pointerup', x, y);
+  })();
+
+  // ?sheet … 入力シートを開く / ?save … 1234円の支出を入力して保存し、履歴を表示
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const q = location.search;
+  if (q.includes('sheet') || q.includes('save')) (async () => {
+    let doc;
+    for (let i = 0; i < 100; i++) { await wait(100); doc = f.contentDocument; if (doc?.querySelector('#tabbar:not([hidden])')) break; }
+    doc.querySelector('[data-action="add-tx"]').click();
+    await wait(200);
+    if (!q.includes('save')) return;
+    const form = doc.querySelector('.sheet');
+    form.querySelector('[name=amount]').value = '1,234';
+    form.querySelector('[name=memo]').value = '自動テスト<b>';
+    form.querySelector('[name=category_expense]').checked = true;
+    form.requestSubmit();
+    await wait(500);
+    doc.querySelector('[data-tab="history"]').click();
+    document.title = 'saved:' + doc.querySelector('.tx-list .tx-main b').textContent + '|' + doc.querySelector('.tx-list .num').textContent + '|sheet-closed:' + !doc.querySelector('.sheet');
+  })();
+</script>

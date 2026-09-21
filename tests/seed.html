@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>サンプルデータ投入(動作確認用)</title>
+<p>サンプルデータを入れています…</p>
+<script type="module">
+  // 動作確認用: お試しモードにサンプルデータを入れてアプリを開く。
+  // 使い方: tests/seed.html#history のように開くと、そのタブを表示する。
+  import { createLocalBackend } from '../js/backend-local.js';
+  import { addMonths, monthOf, toDateStr, daysInMonth, pad2 } from '../js/logic.js';
+
+  localStorage.removeItem('kakeibo-local-v1');
+  const b = createLocalBackend();
+  await b.createHousehold('サンプル家', 'パパ');
+  const papa = await b.myMemberId();
+  const mama = (await b.save('members', { name: 'ママ', in_settlement: true, sort: 1, user_id: null })).id;
+  const kid = (await b.save('members', { name: 'ゆい', in_settlement: false, sort: 2, user_id: null })).id;
+  const cat = Object.fromEntries((await b.list('categories')).map((c) => [c.name, c.id]));
+
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const today = toDateStr(new Date());
+  const thisMonth = monthOf(today);
+  const plan = [['食費', 28, 800, 6500], ['日用品', 6, 400, 3800], ['外食', 5, 1800, 9000], ['交通', 6, 300, 2400], ['医療', 1, 1500, 6000], ['衣服・美容', 2, 3000, 12000], ['趣味・レジャー', 3, 1200, 9000], ['教育・子ども', 2, 3000, 9000]];
+  for (let k = 5; k >= 0; k--) {
+    const month = addMonths(thisMonth, -k);
+    const lastDay = k === 0 ? Number(today.slice(8)) : daysInMonth(month);
+    for (const [name, count, lo, hi] of plan) {
+      for (let i = 0; i < Math.ceil(count * lastDay / 30); i++) {
+        const who = rnd() < 0.55 ? mama : papa;
+        await b.save('transactions', {
+          date: `${month}-${pad2(1 + Math.floor(rnd() * lastDay))}`, kind: 'expense',
+          amount: Math.round((lo + rnd() * (hi - lo)) / 10) * 10, category_id: cat[name], member_id: who,
+          shared: !(name === '衣服・美容' || (name === '趣味・レジャー' && rnd() < 0.5)), memo: ({ '食費': ['スーパー', 'スーパー', 'コンビニ', ''], '外食': ['ランチ', ''], '日用品': ['ドラッグストア', ''], '交通': ['電車', 'ガソリン'] }[name] || [''])[Math.floor(rnd() * 4) % ({ '食費': 4, '外食': 2, '日用品': 2, '交通': 2 }[name] || 1)], recurring_id: null,
+        });
+      }
+    }
+    if (k > 0) await b.save('transactions', { date: `${month}-27`, kind: 'expense', amount: 98000, category_id: cat['住居'], member_id: papa, shared: true, memo: '家賃', recurring_id: null });
+    await b.save('transactions', { date: `${month}-05`, kind: 'expense', amount: 14000 + Math.round(rnd() * 60) * 100, category_id: cat['水道光熱'], member_id: papa, shared: true, memo: '電気・ガス', recurring_id: null });
+    await b.save('transactions', { date: `${month}-10`, kind: 'income', amount: 320000, category_id: cat['給与'], member_id: papa, shared: false, memo: '', recurring_id: null });
+    await b.save('transactions', { date: `${month}-15`, kind: 'income', amount: 180000, category_id: cat['給与'], member_id: mama, shared: false, memo: '', recurring_id: null });
+  }
+  await b.save('transactions', { date: `${thisMonth}-03`, kind: 'expense', amount: 1200, category_id: cat['趣味・レジャー'], member_id: kid, shared: false, memo: 'おこづかいで本', recurring_id: null });
+  for (const [name, amount] of [['食費', 80000], ['外食', 20000], ['日用品', 12000], ['趣味・レジャー', 15000]]) {
+    await b.save('budgets', { category_id: cat[name], amount });
+  }
+  const plan2 = [['スマホ代', 7800, '通信', 1], ['電気代', 9800, '水道光熱', 8], ['ジム', 8800, '趣味・レジャー', 10], ['動画サブスク', 1490, '趣味・レジャー', 20], ['学資保険', 12000, '保険', 21], ['家賃', 98000, '住居', 27]];
+  for (const [name, amount, c, day] of plan2) {
+    await b.save('recurring', { name, kind: 'expense', amount, category_id: cat[c], member_id: papa, shared: true, every: 'month', month_of_year: null, day, start_month: thisMonth, end_month: null, last_generated: null, active: true });
+  }
+  await b.save('recurring', { name: 'パパ給料', kind: 'income', amount: 320000, category_id: cat['給与'], member_id: papa, shared: false, every: 'month', month_of_year: null, day: 25, start_month: addMonths(thisMonth, 1), end_month: null, last_generated: null, active: true });
+  await b.save('recurring', { name: '自動車税', kind: 'expense', amount: 34500, category_id: cat['交通'], member_id: papa, shared: true, every: 'year', month_of_year: 5, day: 31, start_month: thisMonth, end_month: null, last_generated: null, active: true });
+  await b.save('settlements', { date: `${addMonths(thisMonth, -1)}-28`, from_member: mama, to_member: papa, amount: 150000, memo: '先月までの分' });
+  const trip = (await b.save('goals', { name: '家族で沖縄旅行', icon: '🏝️', target: 300000, deadline_month: addMonths(thisMonth, 5), sort: 0 })).id;
+  const fridge = (await b.save('goals', { name: '新しい冷蔵庫', icon: '🧊', target: 180000, deadline_month: null, sort: 1 })).id;
+  for (const [goal_id, member_id, amount, k] of [[trip, papa, 40000, 2], [trip, mama, 30000, 2], [trip, papa, 30000, 1], [trip, mama, 20000, 1], [trip, kid, 1500, 0], [fridge, papa, 90000, 3], [fridge, mama, 75000, 1]]) {
+    await b.save('goal_deposits', { goal_id, member_id, amount, date: `${addMonths(thisMonth, -k)}-25`, memo: '' });
+  }
+  await b.save('loans', { date: `${thisMonth}-05`, member_id: papa, direction: 'lent', counterparty_member_id: null, counterparty_name: 'たろう', amount: 10000, repaid: 3000, memo: '飲み会の立て替え' });
+  await b.save('loans', { date: `${thisMonth}-12`, member_id: papa, direction: 'borrowed', counterparty_member_id: null, counterparty_name: 'たろう', amount: 2000, repaid: 0, memo: 'タクシー代' });
+  await b.save('loans', { date: `${thisMonth}-10`, member_id: kid, direction: 'borrowed', counterparty_member_id: mama, counterparty_name: '', amount: 1500, repaid: 0, memo: 'ゲームの前借り' });
+  await b.save('loans', { date: `${addMonths(thisMonth, -1)}-20`, member_id: mama, direction: 'lent', counterparty_member_id: null, counterparty_name: 'はなこ', amount: 5000, repaid: 5000, memo: 'ランチ代' });
+  location.replace('../index.html' + location.hash);
+</script>

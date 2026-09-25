@@ -1,7 +1,7 @@
 // 実行: node --test tests/logic.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addMonths, recurringDate, dueRecurring, computeSettlement, summarize, budgetStatus, toCsv, yen, recordingStatus, quickPresets, scheduleForMonth, occursIn, summarizeLoans, goalProgress } from '../js/logic.js';
+import { addMonths, recurringDate, dueRecurring, computeSettlement, summarize, budgetStatus, toCsv, yen, recordingStatus, quickPresets, scheduleForMonth, occursIn, summarizeLoans, goalProgress, calcEvaluate, hasOperator } from '../js/logic.js';
 
 test('月の足し引きは年をまたげる', () => {
   assert.equal(addMonths('2026-01', -1), '2025-12');
@@ -184,4 +184,38 @@ test('貯金目標: 達成・期限切れ・期限なし', () => {
   assert.equal(goalProgress({ id: 'g', target: 1000 }, [{ goal_id: 'g', amount: 1500 }], '2026-09-21').reached, true);
   assert.equal(goalProgress({ id: 'g', target: 1000, deadline_month: '2026-08' }, [], '2026-09-21').overdue, true);
   assert.equal(goalProgress({ id: 'g', target: 1000 }, [], '2026-09-21').perMonth, null);
+});
+
+test('精算: 家族どうしの貸し借りは自動で差し引く', () => {
+  const loans = [
+    { id: 'l1', member_id: 'a', direction: 'lent', counterparty_member_id: 'b', amount: 5000, repaid: 0 },
+    { id: 'l2', member_id: 'a', direction: 'borrowed', counterparty_member_id: 'b', amount: 1000, repaid: 0 },
+    { id: 'l3', member_id: 'a', direction: 'lent', counterparty_member_id: null, counterparty_name: 'たろう', amount: 9999, repaid: 0 },
+    { id: 'l4', member_id: 'a', direction: 'lent', counterparty_member_id: 'kid', amount: 700, repaid: 0 },
+    { id: 'l5', member_id: 'b', direction: 'lent', counterparty_member_id: 'a', amount: 3000, repaid: 3000 },
+  ];
+  const r = computeSettlement([M('a'), M('b'), M('kid', false)], {}, [], loans);
+  assert.equal(r.loanCount, 2);
+  assert.deepEqual(r.transfers, [{ from: 'b', to: 'a', amount: 4000 }]);
+  assert.equal(r.balances.find((x) => x.member_id === 'a').loanNet, 4000);
+  // 分割した支出と合わせて1本にまとまる
+  const r2 = computeSettlement([M('a'), M('b')], { a: 0, b: 10000 }, [], loans.slice(0, 1));
+  assert.deepEqual(r2.transfers, [{ from: 'a', to: 'b', amount: 0 }].filter((t) => t.amount) , '5000 貸し − 5000 割り勘 = ちょうどゼロ');
+  assert.equal(r2.transfers.length, 0);
+});
+
+test('電卓: 四則と優先順位、全角、区切り記号', () => {
+  assert.equal(calcEvaluate('1200+350'), 1550);
+  assert.equal(calcEvaluate('3980÷2'), 1990);
+  assert.equal(calcEvaluate('100+200×3'), 700);
+  assert.equal(calcEvaluate('１，２００＋３５０'), 1550);
+  assert.equal(calcEvaluate('¥2,000-500'), 1500);
+  assert.equal(calcEvaluate('1000/3'), 333);
+  assert.equal(calcEvaluate('12+'), 12);
+  assert.equal(calcEvaluate('12+×3'), 36);
+  assert.equal(calcEvaluate('10÷0'), 0);
+  assert.equal(calcEvaluate('100-300'), 0);
+  assert.equal(calcEvaluate(''), 0);
+  assert.equal(hasOperator('1200'), false);
+  assert.equal(hasOperator('1200+1'), true);
 });

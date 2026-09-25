@@ -565,6 +565,21 @@ form[data-cp="member"] .only-other { display: none !important; }
 .swipe-buttons button { background: none; border: 0; min-height: 44px; padding: 0 12px; font-weight: 700; font-size: 15px; }
 .swipe-buttons button:first-child { color: var(--expense); }
 .swipe-buttons button:last-child { color: var(--income); }
+.swipe-buttons .calc-toggle { color: var(--text-2); font-size: 13px; border: 1px solid var(--border); border-radius: 999px; min-height: 34px; padding: 0 12px; align-self: center; }
+.swipe-buttons .calc-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.swipe-amount .expr { display: block; font-size: 15px; font-weight: 500; color: var(--text-2); letter-spacing: 0; margin-bottom: 2px; }
+.keypad.calc { grid-template-columns: repeat(4, 1fr); }
+.keypad.calc button { min-height: 50px; font-size: 21px; }
+.keypad .op { background: var(--track); color: var(--accent); font-weight: 600; }
+.keypad .fn { color: var(--critical); }
+.keypad .eq { grid-column: span 3; background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+.amount-wrap { position: relative; }
+.amount-wrap input.amount { padding-right: 56px; }
+.calc-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 42px; height: 42px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); font-size: 20px; }
+.calc-btn.on { background: var(--accent); border-color: var(--accent); }
+.calc-pad { margin: -6px 0 14px; }
+.calc-pad .preview { min-height: 20px; font-size: 14px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.calc-pad .keypad button { min-height: 44px; font-size: 19px; }
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .keypad button {
   min-height: 56px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface);

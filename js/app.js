@@ -1,6 +1,6 @@
 import {
   toDateStr, monthOf, addMonths, monthRange, monthLabel, yen, daysInMonth, scheduleForMonth, isOnce,
-  summarizeLoans, loanParties, goalProgress,
+  summarizeLoans, loanParties, isMemberLoan, goalProgress, calcEvaluate, hasOperator, normalizeExpr,
   dueRecurring, summarize, computeSettlement, budgetStatus, toCsv, recordingStatus, quickPresets,
 } from './logic.js';
 import { createLocalBackend } from './backend-local.js';
@@ -13,7 +13,8 @@ const $toast = document.getElementById('toast');
 let backend;
 const state = {
   tab: ['home', 'plan', 'goals', 'history', 'settle', 'settings'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'quick',
-  quickAmount: '', // かんたん入力で打ちかけの金額
+  quickAmount: '', // かんたん入力で打ちかけの金額(電卓モードでは「1200+350」のような式)
+  calcMode: false, // かんたん入力のテンキーを電卓にするか
   bubbleMode: 'category', // まとめの泡: 'category' = カテゴリ別 / 'member' = 家族別
   month: monthOf(toDateStr(new Date())),
   historyMember: 'all',
@@ -45,9 +46,7 @@ const memberSlot = (id) => {
 const category = (id) => byId(state.categories, id) || { name: '未分類', icon: '❔' };
 
 function parseAmount(text) {
-  const half = String(text).replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-  const n = parseInt(half.replace(/[^\d]/g, ''), 10);
-  return Number.isFinite(n) ? n : 0;
+  return calcEvaluate(text);
 }
 
 let toastTimer;
@@ -292,13 +291,21 @@ const monthTx = () => state.tx.filter((t) => monthOf(t.date) === state.month);
 // 金額を打つ → カードを左(支出)か右(収入)へスワイプ → カテゴリをタップした瞬間に保存
 
 const SWIPE_THRESHOLD = 70;
-const quickAmountText = () => yen(Number(state.quickAmount || 0));
+const quickValue = () => calcEvaluate(state.quickAmount);
+const prettyExpr = (expr) => normalizeExpr(expr).replace(/\d+/g, (d) => Number(d).toLocaleString('ja-JP'));
+const quickAmountText = () => (hasOperator(state.quickAmount)
+  ? `<small class="expr">${h(prettyExpr(state.quickAmount))}</small>= ${yen(quickValue())}`
+  : yen(quickValue()));
 
 function viewQuick() {
   const t = today();
   const todaySpent = state.tx.filter((x) => x.kind === 'expense' && x.date === t).reduce((a, x) => a + x.amount, 0);
   const monthSpent = state.tx.filter((x) => x.kind === 'expense' && monthOf(x.date) === monthOf(t)).reduce((a, x) => a + x.amount, 0);
-  const keys = ['7', '8', '9', '4', '5', '6', '1', '2', '3', '00', '0', 'back'];
+  const keys = state.calcMode
+    ? ['7', '8', '9', '÷', '4', '5', '6', '×', '1', '2', '3', '-', '00', '0', 'back', '+', 'clear', '=']
+    : ['7', '8', '9', '4', '5', '6', '1', '2', '3', '00', '0', 'back'];
+  const keyLabel = { back: '⌫', clear: 'C', '=': '=', '×': '×', '÷': '÷', '-': '−', '+': '+' };
+  const keyClass = (k) => (k === '=' ? 'eq' : k === 'clear' ? 'fn' : '+-×÷'.includes(k) ? 'op' : '');
   return `
     <section class="quick">
       <p class="quick-context">今日 <b>${yen(todaySpent)}</b><span>・</span>今月 <b>${yen(monthSpent)}</b></p>
@@ -312,9 +319,10 @@ function viewQuick() {
       </div>
       <div class="swipe-buttons">
         <button data-action="quick-commit" data-kind="expense">‹ 支出</button>
+        <button class="calc-toggle ${state.calcMode ? 'on' : ''}" data-action="calc-mode" aria-pressed="${state.calcMode}">🧮 電卓</button>
         <button data-action="quick-commit" data-kind="income">収入 ›</button>
       </div>
-      <div class="keypad">${keys.map((k) => `<button data-action="key" data-k="${k}" ${k === 'back' ? 'aria-label="1文字消す"' : ''}>${k === 'back' ? '⌫' : k}</button>`).join('')}</div>
+      <div class="keypad ${state.calcMode ? 'calc' : ''}">${keys.map((k) => `<button class="${keyClass(k)}" data-action="key" data-k="${k}" ${k === 'back' ? 'aria-label="1文字消す"' : k === 'clear' ? 'aria-label="すべて消す"' : ''}>${keyLabel[k] || k}</button>`).join('')}</div>
       <button class="link quick-detail" data-action="add-tx">日付やメモも入れる(詳しく入力)</button>
     </section>`;
 }
@@ -327,11 +335,21 @@ function pressKey(k) {
   let v = before;
   if (k === 'back') v = v.slice(0, -1);
   else if (k === 'clear') v = '';
-  else v = (v + k).replace(/^0+/, '').slice(0, 9);
+  else if (k === '=') v = hasOperator(v) ? String(calcEvaluate(v) || '') : v;
+  else if ('+-×÷'.includes(k)) {
+    if (!v) return; // 数字より先に演算子は打てない
+    v = /[+\-×÷]$/.test(v) ? v.slice(0, -1) + k : v + k; // 演算子が続いたら後のほうに置き換え
+  } else {
+    // 数字は、いま打っている項の先頭のゼロを詰めて、1項あたり9桁まで
+    const m = v.match(/(\d*)$/);
+    const term = (m[1] + k).replace(/^0+(?=\d)/, '');
+    if (term.length > 9) return;
+    v = v.slice(0, v.length - m[1].length) + term;
+  }
   state.quickAmount = v;
   const el = $app.querySelector('.swipe-amount');
   if (!el) return;
-  el.textContent = quickAmountText();
+  el.innerHTML = quickAmountText();
   el.classList.toggle('empty', !v);
   if (calmMotion()) return;
   // 押すたびに金額が弾む。入れ始めたら「スワイプしてね」とカードが小さく揺れる
@@ -409,7 +427,7 @@ function flyEmoji(emoji, from, to) {
 }
 
 function quickCommit(kind) {
-  const amount = Number(state.quickAmount || 0);
+  const amount = quickValue(); // 式のままでも計算した結果を使う
   const card = $app.querySelector('.swipe-card');
   if (!amount) {
     if (card) {
@@ -530,6 +548,8 @@ document.addEventListener('keydown', (e) => {
   if (state.tab !== 'quick' || $tabbar.hidden || $sheetRoot.childElementCount || e.metaKey || e.ctrlKey || e.altKey) return;
   if (/^INPUT|TEXTAREA|SELECT$/.test(e.target.tagName)) return;
   if (/^[0-9]$/.test(e.key)) pressKey(e.key);
+  else if (['+', '-', '*', '/'].includes(e.key)) pressKey({ '*': '×', '/': '÷' }[e.key] || e.key);
+  else if (e.key === 'Enter' || e.key === '=') pressKey('=');
   else if (e.key === 'Backspace') pressKey('back');
   else if (e.key === 'Escape') pressKey('clear');
   else if (e.key === 'ArrowLeft') quickCommit('expense');
@@ -1274,8 +1294,19 @@ const partyDot = (p) => (p.member_id
   ? `<span class="avatar" style="background:var(--series-${memberSlot(p.member_id)})">${h([...memberName(p.member_id)][0] || '?')}</span>`
   : `<span class="avatar other">${h([...p.name][0] || '?')}</span>`);
 
+const settlementIds = () => new Set(state.members.filter((m) => m.in_settlement).map((m) => m.id));
+
 function viewLoans() {
-  const sum = summarizeLoans(state.loans);
+  const ids = settlementIds();
+  const inSettle = state.loans.filter((l) => isMemberLoan(l, ids) && l.amount - l.repaid > 0);
+  const sum = summarizeLoans(state.loans, new Set(inSettle.map((l) => l.id)));
+  const familyRows = inSettle.map((l) => {
+    const { lender, borrower } = loanParties(l);
+    return `<li><button class="tx" data-action="edit-loan" data-id="${l.id}">
+      <span class="tx-icon">👥</span>
+      <span class="tx-main"><b>${h(l.memo || `${partyName(lender)} が貸した`)}</b><small>${shortDate(l.date)} ・ ${h(partyName(lender))} → ${h(partyName(borrower))}</small></span>
+      <span class="num">${yen(l.amount - l.repaid)}</span></button></li>`;
+  }).join('');
   const pairs = sum.pairs.map((pair) => `
     <section class="card loan-pair">
       <div class="loan-head">
@@ -1307,7 +1338,14 @@ function viewLoans() {
       <div><span>借りている(返す)</span><b class="${sum.borrowedOutside ? 'neg' : ''}">${yen(sum.borrowedOutside)}</b></div>
     </section>
     <p class="muted small loan-note">上の合計は家族以外との分です。貸し借りは、家計の支出や収入には含めません。</p>
-    ${pairs || '<section class="card hint"><p class="muted">「お昼代を立て替えた」「友だちに1万円借りた」など、あとで返す・返してもらうお金を記録できます。家族どうしでも、家族以外でもOKです。</p></section>'}
+    ${familyRows ? `
+      <section class="card">
+        <h2>家族どうしの貸し借り</h2>
+        <p class="muted small">「立て替え」の精算に自動で入っています。渡す金額はそちらで計算され、「渡したら記録」で解消します。</p>
+        <ul class="tx-list plan-rows">${familyRows}</ul>
+        <button class="link" data-action="settle-mode" data-mode="split">立て替えの精算を見る ›</button>
+      </section>` : ''}
+    ${pairs || (familyRows ? '' : '<section class="card hint"><p class="muted">「お昼代を立て替えた」「友だちに1万円借りた」など、あとで返す・返してもらうお金を記録できます。家族どうしの分は「立て替え」の精算に自動で入ります。</p></section>')}
     <button class="btn primary plan-add" data-action="edit-loan">+ 貸し借りを記録</button>
     ${settled ? `<details class="plan-past"><summary>返し終わったもの(${sum.settled.length}件)</summary><ul class="tx-list plan-rows">${settled}</ul></details>` : ''}`;
 }
@@ -1378,7 +1416,7 @@ function openRepaySheet(id) {
 }
 
 function viewSplit() {
-  const result = computeSettlement(state.members, state.paidTotals, state.settlements);
+  const result = computeSettlement(state.members, state.paidTotals, state.settlements, state.loans);
   if (!result.balances.length) {
     return `
       <section class="card hint"><p class="muted">精算は、お金を出し合うメンバーが2人以上いるときに使えます。「設定 → メンバー」で家族を追加してください。</p></section>`;
@@ -1395,7 +1433,7 @@ function viewSplit() {
   const balances = result.balances.map((b) => `
     <div class="bal-row">
       <span><span class="dot" style="background:var(--series-${memberSlot(b.member_id)})"></span>${h(memberName(b.member_id))}</span>
-      <span class="muted">支払い ${yen(b.paid)}</span>
+      <span class="muted">支払い ${yen(b.paid)}${b.loanNet ? ` ・ 貸し借り ${b.loanNet > 0 ? '+' : '-'}${yen(Math.abs(b.loanNet))}` : ''}</span>
       <span class="num">${b.balance === 0 ? '±0' : b.balance > 0 ? `${yen(b.balance)} もらう` : `${yen(-b.balance)} 払う`}</span>
     </div>`).join('');
 
@@ -1410,7 +1448,7 @@ function viewSplit() {
   const splitList = state.tx.filter((t) => t.kind === 'expense' && t.shared);
   const splitRows = splitList.slice(0, 30).map((t) => txRow(t, true)).join('');
 
-  if (!result.total && !state.settlements.length) {
+  if (!result.total && !state.settlements.length && !result.loanCount) {
     return `
       <section class="card hint">
         <h2>分割した支出はまだありません</h2>
@@ -1423,7 +1461,7 @@ function viewSplit() {
     <section class="card"><h2>いま渡す金額</h2>${transfers}</section>
     <section class="card">
       <h2>内訳(これまでの合計)</h2>
-      <p class="muted small">「メンバーで分割」にした支出 ${yen(result.total)} を ${result.balances.length}人で均等に割っています(1人あたり ${yen(result.share)})。</p>
+      <p class="muted small">「メンバーで分割」にした支出 ${yen(result.total)} を ${result.balances.length}人で均等に割っています(1人あたり ${yen(result.share)})。${result.loanCount ? `家族どうしの貸し借り ${result.loanCount}件も差し引いています。` : ''}</p>
       ${balances}
     </section>
     ${splitRows ? `
@@ -1584,7 +1622,53 @@ function openSheet(title, bodyHtml, { onSubmit, onDelete, onAgain, submitLabel =
     const ok = await guard(async () => { await onDelete(); return true; });
     if (ok) close();
   });
+  attachCalc(form);
   return form;
+}
+
+// 金額欄のとなりに「電卓」ボタンを付け、押すとその下に電卓のキーが出る。
+// 「1200+350」のように式のまま保存しても、計算した結果が使われる
+function attachCalc(form) {
+  for (const input of form.querySelectorAll('input.amount')) {
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    const wrap = document.createElement('div');
+    wrap.className = 'amount-wrap';
+    input.replaceWith(wrap);
+    wrap.append(input);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'calc-btn';
+    toggle.setAttribute('aria-label', '電卓を開く');
+    toggle.textContent = '🧮';
+    wrap.append(toggle);
+    const pad = document.createElement('div');
+    pad.className = 'calc-pad';
+    pad.hidden = true;
+    const keys = ['7', '8', '9', '÷', '4', '5', '6', '×', '1', '2', '3', '-', '00', '0', 'back', '+', 'clear', '='];
+    const label = { back: '⌫', clear: 'C', '-': '−' };
+    pad.innerHTML = `<div class="preview" aria-live="polite"></div><div class="keypad calc">${keys.map((k) => `<button type="button" class="${k === '=' ? 'eq' : k === 'clear' ? 'fn' : '+-×÷'.includes(k) ? 'op' : ''}" data-k="${k}">${label[k] || k}</button>`).join('')}</div>`;
+    wrap.after(pad);
+    const preview = pad.querySelector('.preview');
+    const refresh = () => { preview.textContent = hasOperator(input.value) ? `${prettyExpr(input.value)} = ${yen(calcEvaluate(input.value))}` : ''; };
+    toggle.addEventListener('click', () => { pad.hidden = !pad.hidden; toggle.classList.toggle('on', !pad.hidden); if (!pad.hidden) refresh(); });
+    input.addEventListener('input', refresh);
+    pad.addEventListener('click', (e) => {
+      const k = e.target.closest('[data-k]')?.dataset.k;
+      if (!k) return;
+      let v = normalizeExpr(input.value);
+      if (k === 'back') v = v.slice(0, -1);
+      else if (k === 'clear') v = '';
+      else if (k === '=') v = hasOperator(v) ? String(calcEvaluate(v) || '') : v;
+      else if ('+-×÷'.includes(k)) { if (v) v = /[+\-×÷]$/.test(v) ? v.slice(0, -1) + k : v + k; }
+      else v += k;
+      input.value = v;
+      refresh();
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // 欄から離れたら式を結果に置き換える
+    input.addEventListener('blur', () => { if (hasOperator(input.value)) { input.value = calcEvaluate(input.value) || ''; refresh(); } });
+  }
 }
 
 const radioChips = (name, options, selected) => `
@@ -1853,7 +1937,8 @@ function openSettleSheet({ from, to, amount }) {
 
 const actions = {
   'bubble-mode': (d) => { state.bubbleMode = d.mode; render(); },
-  'add-tx': () => openTxSheet(null, state.tab === 'quick' && state.quickAmount ? { amount: Number(state.quickAmount) } : {}),
+  'add-tx': () => openTxSheet(null, state.tab === 'quick' && state.quickAmount ? { amount: quickValue() } : {}),
+  'calc-mode': () => { state.calcMode = !state.calcMode; render(); },
   key: (d) => pressKey(d.k),
   'quick-commit': (d) => quickCommit(d.kind),
   'edit-tx': (d) => openTxSheet(d.id),

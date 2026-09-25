@@ -136,12 +136,13 @@ export function summarize(transactions) {
 //  members: [{id, in_settlement}]
 //  paidTotals: {member_id: 「メンバーで分割」にした支出として払った合計}
 //  settlements: [{from_member, to_member, amount}]
+//  loans: 個人間の貸し借り。精算対象メンバーどうしのものは自動でここに含める
 // 分割にした支出は、精算対象メンバーで均等割り。
-// 戻り値: { total, share, balances: [{member_id, paid, balance}], transfers: [{from, to, amount}] }
+// 戻り値: { total, share, balances: [{member_id, paid, loanNet, balance}], transfers: [{from, to, amount}], loanCount }
 //  balance > 0 は「もらう側」、< 0 は「払う側」
-export function computeSettlement(members, paidTotals, settlements) {
+export function computeSettlement(members, paidTotals, settlements, loans = []) {
   const parts = members.filter((m) => m.in_settlement);
-  if (parts.length < 2) return { total: 0, share: 0, balances: [], transfers: [] };
+  if (parts.length < 2) return { total: 0, share: 0, balances: [], transfers: [], loanCount: 0 };
   const ids = new Set(parts.map((m) => m.id));
   let total = 0;
   for (const m of parts) total += paidTotals[m.id] || 0;
@@ -151,9 +152,24 @@ export function computeSettlement(members, paidTotals, settlements) {
     if (ids.has(s.from_member)) bal.set(s.from_member, bal.get(s.from_member) + s.amount);
     if (ids.has(s.to_member)) bal.set(s.to_member, bal.get(s.to_member) - s.amount);
   }
+  // 家族どうしの貸し借り: 貸した人はもらう側、借りた人は払う側に寄せる
+  const loanNet = new Map(parts.map((m) => [m.id, 0]));
+  let loanCount = 0;
+  for (const loan of loans) {
+    if (!isMemberLoan(loan, ids)) continue;
+    const remaining = loan.amount - loan.repaid;
+    if (remaining <= 0) continue;
+    const { lender, borrower } = loanParties(loan);
+    loanNet.set(lender.member_id, loanNet.get(lender.member_id) + remaining);
+    loanNet.set(borrower.member_id, loanNet.get(borrower.member_id) - remaining);
+    bal.set(lender.member_id, bal.get(lender.member_id) + remaining);
+    bal.set(borrower.member_id, bal.get(borrower.member_id) - remaining);
+    loanCount++;
+  }
   const balances = parts.map((m) => ({
     member_id: m.id,
     paid: paidTotals[m.id] || 0,
+    loanNet: loanNet.get(m.id),
     balance: Math.round(bal.get(m.id)),
   }));
 
@@ -173,7 +189,7 @@ export function computeSettlement(members, paidTotals, settlements) {
     if (debtors[i].v < 1) i++;
     if (creditors[j].v < 1) j++;
   }
-  return { total, share, balances, transfers };
+  return { total, share, balances, transfers, loanCount };
 }
 
 // 記録の続き具合(固定費の自動記録は数えない)
@@ -210,16 +226,22 @@ export function loanParties(loan) {
   return loan.direction === 'lent' ? { lender: me, borrower: other } : { lender: other, borrower: me };
 }
 
+// 精算対象メンバーどうしの貸し借りか(ids: 精算対象メンバーの id の集合)
+export function isMemberLoan(loan, ids) {
+  return Boolean(loan.member_id && loan.counterparty_member_id) && ids.has(loan.member_id) && ids.has(loan.counterparty_member_id);
+}
+
 const partyKey = (p) => (p.member_id ? `m:${p.member_id}` : `o:${p.name}`);
 
 // まだ返し終わっていない貸し借りを、相手の組み合わせごとに差し引きしてまとめる。
 //  戻り値: { pairs: [{ from(返す人), to(受け取る人), amount(差し引きの残り), items }], lentOutside, borrowedOutside, settled }
-export function summarizeLoans(loans) {
+export function summarizeLoans(loans, excludeIds = new Set()) {
   const groups = new Map();
   const settled = [];
   let lentOutside = 0;
   let borrowedOutside = 0;
   for (const loan of loans) {
+    if (excludeIds.has(loan.id)) continue;
     const remaining = loan.amount - loan.repaid;
     if (remaining <= 0) { settled.push(loan); continue; }
     const { lender, borrower } = loanParties(loan);
@@ -269,6 +291,59 @@ export function goalProgress(goal, deposits, todayStr) {
     }
   }
   return { saved, left, ratio: Math.min(1, saved / goal.target), reached: saved >= goal.target, byMember, monthsLeft, perMonth, overdue, count: mine.length };
+}
+
+// ───────── 電卓 ─────────
+// 「1200+350」「3980÷2」のような式を安全に計算する。全角や , ¥ も受け付ける
+
+export function normalizeExpr(text) {
+  return String(text ?? '')
+    .replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[＋]/g, '+')
+    .replace(/[－ー−–]/g, '-')
+    .replace(/[×xX＊*]/g, '×')
+    .replace(/[÷／/]/g, '÷')
+    .replace(/[.．]/g, '.')
+    .replace(/[^0-9.+\-×÷]/g, '');
+}
+
+export const hasOperator = (text) => /[+\-×÷]/.test(normalizeExpr(text).replace(/^-/, ''));
+
+// 式を計算して、円(整数)を返す。計算できないときは 0
+export function calcEvaluate(text) {
+  const expr = normalizeExpr(text);
+  const tokens = expr.match(/\d+(?:\.\d+)?|\.\d+|[+\-×÷]/g) || [];
+  const nums = [];
+  const ops = [];
+  let expectNumber = true;
+  for (const t of tokens) {
+    if (/^[+\-×÷]$/.test(t)) {
+      if (expectNumber) {
+        if (t === '-' && nums.length === 0) { nums.push(0); ops.push('-'); expectNumber = true; }
+        else if (ops.length) ops[ops.length - 1] = t; // 演算子が続いたら後のほうを使う
+      } else { ops.push(t); expectNumber = true; }
+    } else {
+      if (!expectNumber) continue;
+      nums.push(Number(t));
+      expectNumber = false;
+    }
+  }
+  if (expectNumber && ops.length) ops.pop(); // 末尾の演算子は無視
+  if (!nums.length) return 0;
+  // × ÷ を先に
+  const v = [nums[0]];
+  const o = [];
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i];
+    const n = nums[i + 1];
+    if (op === '×') v[v.length - 1] *= n;
+    else if (op === '÷') v[v.length - 1] = n === 0 ? NaN : v[v.length - 1] / n;
+    else { v.push(n); o.push(op); }
+  }
+  let result = v[0];
+  for (let i = 0; i < o.length; i++) result = o[i] === '+' ? result + v[i + 1] : result - v[i + 1];
+  if (!Number.isFinite(result)) return 0;
+  return Math.max(0, Math.round(result));
 }
 
 // 予算の状態

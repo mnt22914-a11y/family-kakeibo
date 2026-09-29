@@ -94,10 +94,16 @@ export function createLocalBackend(key = KEY) {
         for (const l of db.loans) if (l.counterparty_member_id === id) l.counterparty_member_id = null;
       }
       if (table === 'goals') db.goal_deposits = db.goal_deposits.filter((d) => d.goal_id !== id);
+      if (table === 'loans') db.transactions = db.transactions.filter((t) => t.loan_id !== id);
       if (table === 'recurring') {
         for (const t of db.transactions) if (t.recurring_id === id) t.recurring_id = null;
       }
       persist();
+    },
+
+    // 貸し借りから自動で作った取引(期間を問わずすべて)
+    async linkedTransactions() {
+      return db.transactions.filter((t) => t.loan_id);
     },
 
     async insertGenerated(rows) {

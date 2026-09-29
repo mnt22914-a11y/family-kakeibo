@@ -2,6 +2,7 @@ import {
   toDateStr, monthOf, addMonths, monthRange, monthLabel, yen, daysInMonth, scheduleForMonth, isOnce,
   summarizeLoans, loanParties, isMemberLoan, goalProgress, calcEvaluate, hasOperator, normalizeExpr,
   dueRecurring, summarize, computeSettlement, budgetStatus, toCsv, recordingStatus, quickPresets,
+  LOAN_CATEGORY, LOAN_ICON, isFamilyLoan, loanBookings, repaymentBookings, isRepaymentRow, planLoanSync, allocateSettlementToLoans,
 } from './logic.js';
 import { createLocalBackend } from './backend-local.js';
 
@@ -104,6 +105,7 @@ async function startMain() {
   state.household = await backend.getHousehold();
   state.myMemberId = await backend.myMemberId();
   await runRecurring();
+  await guard(syncLoanBookings);
   await loadAll();
   $tabbar.hidden = false;
   render();
@@ -131,6 +133,46 @@ async function runRecurring() {
     await backend.insertGenerated(rows);
     for (const u of updates) await backend.patch('recurring', u.id, { last_generated: u.last_generated });
   });
+}
+
+// ───────── 家族どうしの貸し借りの自動記録 ─────────
+
+// 「貸し借り」カテゴリ(支出・収入)。なければ作る。入力画面や予算には出さないよう、しまった状態で作る
+async function loanCategories() {
+  const find = (kind) => state.categories.find((c) => c.kind === kind && c.name === LOAN_CATEGORY);
+  const out = {};
+  for (const kind of ['expense', 'income']) {
+    let c = find(kind);
+    if (!c) {
+      c = await backend.save('categories', { kind, name: LOAN_CATEGORY, icon: LOAN_ICON, sort: state.categories.length, archived: true });
+      state.categories.push(c);
+    }
+    out[kind] = c.id;
+  }
+  return out;
+}
+
+const memberNameOf = (id) => memberName(id);
+
+// 貸し借りと、自動で作った収支の記録を合わせる(足りない分を作り、金額・日付などのずれを直す)
+async function syncLoanBookings() {
+  const [loans, linked, members, categories] = await Promise.all([
+    backend.list('loans'), backend.linkedTransactions(), backend.list('members'), backend.list('categories'),
+  ]);
+  state.members = members;
+  state.categories = categories;
+  if (!loans.some(isFamilyLoan) && !linked.length) return;
+  const cats = await loanCategories();
+  const plan = planLoanSync(loans, linked, cats, memberNameOf);
+  if (plan.inserts.length) await backend.insertMany('transactions', plan.inserts);
+  for (const u of plan.updates) await backend.patch('transactions', u.id, u.fields);
+  for (const id of plan.deletes) await backend.remove('transactions', id);
+}
+
+// 返済を記録する(家族どうしなら、借りた人の支出・貸した人の収入も作る)
+async function recordRepayment(loan, amount, date) {
+  await backend.patch('loans', loan.id, { repaid: loan.repaid + amount });
+  if (isFamilyLoan(loan)) await backend.insertMany('transactions', repaymentBookings(loan, amount, date, await loanCategories(), memberNameOf));
 }
 
 async function loadAll() {
@@ -1337,11 +1379,11 @@ function viewLoans() {
       <div><span>貸している(返ってくる)</span><b class="pos">${yen(sum.lentOutside)}</b></div>
       <div><span>借りている(返す)</span><b class="${sum.borrowedOutside ? 'neg' : ''}">${yen(sum.borrowedOutside)}</b></div>
     </section>
-    <p class="muted small loan-note">上の合計は家族以外との分です。貸し借りは、家計の支出や収入には含めません。</p>
+    <p class="muted small loan-note">上の合計は家族以外との分です。家族以外との貸し借りは、家計の支出や収入には含めません。家族どうしの分は、貸した人の支出・借りた人の収入として自動で記録します。</p>
     ${familyRows ? `
       <section class="card">
         <h2>家族どうしの貸し借り</h2>
-        <p class="muted small">「立て替え」の精算に自動で入っています。渡す金額はそちらで計算され、「渡したら記録」で解消します。</p>
+        <p class="muted small">「立て替え」の精算に自動で入っています。渡す金額はそちらで計算され、「渡したら記録」で返済になります(収支にも記録されます)。</p>
         <ul class="tx-list plan-rows">${familyRows}</ul>
         <button class="link" data-action="settle-mode" data-mode="split">立て替えの精算を見る ›</button>
       </section>` : ''}
@@ -1367,7 +1409,8 @@ function openLoanSheet(id) {
     <datalist id="loan-names">${names.map((n) => `<option value="${h(n)}">`).join('')}</datalist>
     <label>日付<input name="date" type="date" value="${v.date}" required></label>
     <label>メモ(任意)<input name="memo" value="${h(v.memo)}" maxlength="60" placeholder="例: ランチ代の立て替え"></label>
-    ${l && l.repaid ? `<p class="muted small">これまでに ${yen(l.repaid)} 返済済みです。</p>` : ''}`, {
+    ${l && l.repaid ? `<p class="muted small">これまでに ${yen(l.repaid)} 返済済みです。<button type="button" class="link" data-undo-repaid>返済の記録を取り消す</button></p>` : ''}
+    <p class="muted small only-member">家族どうしの貸し借りは、貸した人の支出・借りた人の収入として自動で記録します(返したときは逆向き)。</p>`, {
     onSubmit: async (f) => {
       const amount = parseAmount(f.get('amount'));
       if (amount <= 0) throw new Error('金額を入力してください');
@@ -1378,20 +1421,36 @@ function openLoanSheet(id) {
       if (who === 'other' && !name) throw new Error('相手の名前を入力してください');
       if (who === member_id) throw new Error('自分自身とは貸し借りできません');
       if (l && amount < l.repaid) throw new Error(`すでに ${yen(l.repaid)} 返済済みなので、それより小さくできません`);
+      const counterparty = who === 'other' ? null : who;
+      if (l && l.repaid && (f.get('direction') !== l.direction || member_id !== l.member_id || counterparty !== l.counterparty_member_id)) {
+        throw new Error('返済済みの分があるので、向きや相手は変えられません。先に「返済の記録を取り消す」を押してください');
+      }
       await backend.save('loans', {
         ...(l ? { id: l.id } : {}),
         direction: f.get('direction'), amount, member_id,
-        counterparty_member_id: who === 'other' ? null : who,
+        counterparty_member_id: counterparty,
         counterparty_name: who === 'other' ? name : '',
         date: f.get('date') || today(), memo: f.get('memo').trim(), repaid: l ? l.repaid : 0,
       });
-      await reload('保存しました');
+      await syncLoanBookings();
+      await reload(counterparty ? '保存しました(収支にも記録しました)' : '保存しました');
     },
-    onDelete: l ? async () => { await backend.remove('loans', l.id); await reload('削除しました'); } : null,
+    onDelete: l ? async () => { await backend.remove('loans', l.id); await reload(isFamilyLoan(l) ? '削除しました(収支の記録も消しました)' : '削除しました'); } : null,
   });
   const sync = () => { form.dataset.cp = new FormData(form).get('counterparty') === 'other' ? 'other' : 'member'; };
   form.addEventListener('change', sync);
   sync();
+  form.querySelector('[data-undo-repaid]')?.addEventListener('click', async () => {
+    if (!confirm(`返済済みの ${yen(l.repaid)} を「まだ返していない」に戻します。${isFamilyLoan(l) ? '返したときに自動で付けた収支の記録も消します。' : ''}よろしいですか?`)) return;
+    const ok = await guard(async () => {
+      await backend.patch('loans', l.id, { repaid: 0 });
+      for (const t of await backend.linkedTransactions()) if (t.loan_id === l.id && isRepaymentRow(l, t)) await backend.remove('transactions', t.id);
+      return true;
+    });
+    if (!ok) return;
+    $sheetRoot.innerHTML = '';
+    await reload('返済の記録を取り消しました');
+  });
   if (!l) form.querySelector('.amount').focus();
 }
 
@@ -1403,13 +1462,15 @@ function openRepaySheet(id) {
   openSheet('返済を記録', `
     <p><b>${h(partyName(borrower))}</b> → <b>${h(partyName(lender))}</b> <span class="muted">(残り ${yen(remaining)})</span></p>
     <label>返した金額<input name="amount" class="amount" inputmode="numeric" value="${remaining}" required></label>
-    <p class="muted small">一部だけ返したときは、その金額に直してください。</p>`, {
+    <p class="muted small">一部だけ返したときは、その金額に直してください。</p>
+    <label>日付<input name="date" type="date" value="${today()}" required></label>
+    ${isFamilyLoan(l) ? `<p class="muted small">${h(partyName(borrower))} の支出・${h(partyName(lender))} の収入として収支にも記録します。</p>` : ''}`, {
     submitLabel: '記録する',
     onSubmit: async (f) => {
       const amount = parseAmount(f.get('amount'));
       if (amount <= 0) throw new Error('金額を入力してください');
       if (amount > remaining) throw new Error(`残りは ${yen(remaining)} です`);
-      await backend.patch('loans', l.id, { repaid: l.repaid + amount });
+      await recordRepayment(l, amount, f.get('date') || today());
       await reload(amount === remaining ? '✓ 返し終わりました' : '返済を記録しました');
     },
   });
@@ -1576,12 +1637,14 @@ async function importTrialData() {
   }
   for (const g of raw.goals || []) idMap.set(g.id, (await backend.save('goals', strip(g))).id);
 
-  await backend.insertMany('transactions', (raw.transactions || []).map((t) => ({ ...strip(t), category_id: ref(t.category_id), member_id: ref(t.member_id), recurring_id: ref(t.recurring_id) })));
+  // 貸し借りから自動で作った取引は取り込まず、最後に作り直す
+  await backend.insertMany('transactions', (raw.transactions || []).filter((t) => !t.loan_id).map(({ loan_id, ...t }) => ({ ...strip(t), category_id: ref(t.category_id), member_id: ref(t.member_id), recurring_id: ref(t.recurring_id) })));
   const budgeted = new Set(state.budgets.map((b) => b.category_id));
   await backend.insertMany('budgets', (raw.budgets || []).map((b) => ({ category_id: ref(b.category_id), amount: b.amount })).filter((b) => b.category_id && !budgeted.has(b.category_id)));
   await backend.insertMany('settlements', (raw.settlements || []).map((x) => ({ ...strip(x), from_member: ref(x.from_member), to_member: ref(x.to_member) })).filter((x) => x.from_member && x.to_member));
   await backend.insertMany('loans', (raw.loans || []).map((l) => ({ ...strip(l), member_id: ref(l.member_id), counterparty_member_id: ref(l.counterparty_member_id) })));
   await backend.insertMany('goal_deposits', (raw.goal_deposits || []).map((d) => ({ ...strip(d), goal_id: ref(d.goal_id), member_id: ref(d.member_id) })).filter((d) => d.goal_id));
+  await syncLoanBookings();
 
   // 二重に取り込まないよう、取り込み済みの印を付けて退避する
   localStorage.setItem(`${LOCAL_KEY}-imported`, localStorage.getItem(LOCAL_KEY));
@@ -1728,6 +1791,7 @@ function readEntry(f) {
 
 function openTxSheet(id, defaults = {}) {
   const t = id ? byId(state.tx, id) : null;
+  if (t?.loan_id) return openLinkedTxSheet(t);
   const v = t || { kind: 'expense', date: today(), member_id: state.myMemberId, shared: false, memo: '', ...defaults };
   const presets = t ? [] : quickPresets(state.tx).filter((p) => byId(state.categories, p.category_id) && !category(p.category_id).archived);
   const yesterday = toDateStr(new Date(Date.now() - 86400000));
@@ -1777,6 +1841,24 @@ function openTxSheet(id, defaults = {}) {
   if (!t) amountInput.focus();
 }
 let lastEntry = {};
+
+function openLinkedTxSheet(t) {
+  const loan = byId(state.loans, t.loan_id);
+  openSheet('貸し借りの記録', `
+    <p><b>${h(t.memo)}</b></p>
+    <p class="muted">${shortDate(t.date)} ・ ${h(memberName(t.member_id))} の${t.kind === 'income' ? '収入' : '支出'} <b class="num">${yen(t.amount)}</b></p>
+    <p class="muted small">この記録は、家族どうしの貸し借りから自動で作られています。金額や日付を直すときや消すときは、「精算 → 貸し借り」から元の貸し借りを開いてください。</p>`, {
+    submitLabel: loan ? '貸し借りを開く' : '閉じる',
+    onSubmit: async () => {
+      if (!loan) return true;
+      state.tab = 'settle';
+      state.settleMode = 'loans';
+      render();
+      openLoanSheet(loan.id);
+      return false;
+    },
+  });
+}
 
 function openRecurringSheet(id) {
   const r = id ? byId(state.recurring, id) : null;
@@ -1917,20 +1999,33 @@ function openCategorySheet(id, kind) {
   });
 }
 
+// 渡したお金のうち、家族どうしの貸し借りの分は「返済」として記録し(収支にも載る)、残りを立て替えの精算として記録する
 function openSettleSheet({ from, to, amount }) {
-  openSheet('精算を記録', `
+  const allocate = (value) => allocateSettlementToLoans(state.loans, from, to, value, settlementIds());
+  const loanNote = (value) => {
+    const a = allocate(value);
+    return a.loanTotal ? `このうち ${yen(a.loanTotal)} は貸し借りの返済として、${h(memberName(from))} の支出・${h(memberName(to))} の収入にも記録します。` : '';
+  };
+  const form = openSheet('精算を記録', `
     <p><b>${h(memberName(from))}</b> → <b>${h(memberName(to))}</b></p>
     <label>渡した金額<input name="amount" class="amount" inputmode="numeric" value="${amount}" required></label>
+    <p class="muted small settle-loan-note">${loanNote(amount)}</p>
     <label>日付<input name="date" type="date" value="${today()}" required></label>
     <label>メモ(任意)<input name="memo" maxlength="60" placeholder="例: 9月分 振込"></label>`, {
     submitLabel: '記録する',
     onSubmit: async (f) => {
       const value = parseAmount(f.get('amount'));
       if (value <= 0) throw new Error('金額を入力してください');
-      await backend.save('settlements', { from_member: from, to_member: to, amount: value, date: f.get('date') || today(), memo: f.get('memo').trim() });
-      await reload('精算を記録しました');
+      const date = f.get('date') || today();
+      const memo = f.get('memo').trim();
+      const a = allocate(value);
+      for (const it of a.items) await recordRepayment(it.loan, it.amount, date);
+      if (a.rest > 0) await backend.save('settlements', { from_member: from, to_member: to, amount: a.rest, date, memo });
+      await reload(a.loanTotal ? `精算を記録しました(うち貸し借りの返済 ${yen(a.loanTotal)})` : '精算を記録しました');
     },
   });
+  const note = form.querySelector('.settle-loan-note');
+  form.querySelector('[name=amount]').addEventListener('input', (e) => { note.innerHTML = loanNote(parseAmount(e.target.value)); });
 }
 
 // ───────── 操作 ─────────

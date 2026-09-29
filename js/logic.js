@@ -208,7 +208,7 @@ export function recordingStatus(transactions, todayStr) {
 export function quickPresets(transactions, limit = 6) {
   const map = new Map();
   for (const t of transactions) {
-    if (t.recurring_id || !t.memo || !t.category_id) continue;
+    if (t.recurring_id || t.loan_id || !t.memo || !t.category_id) continue;
     const key = `${t.kind}|${t.category_id}|${t.memo}`;
     const p = map.get(key);
     if (p) p.count++;
@@ -262,6 +262,100 @@ export function summarizeLoans(loans, excludeIds = new Set()) {
   })).sort((x, y) => y.amount - x.amount);
   settled.sort((x, y) => y.date.localeCompare(x.date));
   return { pairs, lentOutside, borrowedOutside, settled };
+}
+
+// ───────── 家族どうしの貸し借りの自動記録 ─────────
+// 貸したとき: 貸した人の「支出」と借りた人の「収入」を作る。返したとき: 逆向き(借りた人の支出・貸した人の収入)。
+// どちらも transactions.loan_id で貸し借りにつなぐ。家族以外との貸し借りは収支に含めない。
+
+export const LOAN_CATEGORY = '貸し借り';
+export const LOAN_ICON = '🤝';
+
+// 家族どうし(両方がメンバー)の貸し借りか
+export const isFamilyLoan = (loan) => Boolean(loan.member_id && loan.counterparty_member_id);
+
+const withMemo = (base, memo) => (memo ? `${base}・${memo}` : base);
+
+// 貸したときの記録(2件)。cats = { expense: 貸し借りカテゴリの id, income: 同 }、nameOf = メンバー名
+export function loanBookings(loan, cats, nameOf) {
+  if (!isFamilyLoan(loan)) return [];
+  const { lender, borrower } = loanParties(loan);
+  const base = { date: loan.date, amount: loan.amount, shared: false, recurring_id: null, loan_id: loan.id };
+  return [
+    { ...base, kind: 'expense', member_id: lender.member_id, category_id: cats.expense, memo: withMemo(`${nameOf(borrower.member_id)}に貸した`, loan.memo) },
+    { ...base, kind: 'income', member_id: borrower.member_id, category_id: cats.income, memo: withMemo(`${nameOf(lender.member_id)}から借りた`, loan.memo) },
+  ];
+}
+
+// 返したときの記録(2件)
+export function repaymentBookings(loan, amount, date, cats, nameOf) {
+  if (!isFamilyLoan(loan) || amount <= 0) return [];
+  const { lender, borrower } = loanParties(loan);
+  const base = { date, amount, shared: false, recurring_id: null, loan_id: loan.id };
+  return [
+    { ...base, kind: 'expense', member_id: borrower.member_id, category_id: cats.expense, memo: withMemo(`${nameOf(lender.member_id)}に返した`, loan.memo) },
+    { ...base, kind: 'income', member_id: lender.member_id, category_id: cats.income, memo: withMemo(`${nameOf(borrower.member_id)}から返ってきた`, loan.memo) },
+  ];
+}
+
+// 返済の記録か(借りた人の支出・貸した人の収入)
+export function isRepaymentRow(loan, t) {
+  if (!isFamilyLoan(loan)) return false;
+  const { lender, borrower } = loanParties(loan);
+  return (t.kind === 'expense' && t.member_id === borrower.member_id) || (t.kind === 'income' && t.member_id === lender.member_id);
+}
+
+// 貸し借りと、それにつながった記録を見比べて、足りない・ずれている「貸したときの記録」を直す計画を作る。
+//  linked: loan_id の入った取引すべて
+//  戻り値: { inserts: [行], updates: [{id, fields}], deletes: [id] }
+// 返済済みの分があるのにつながった記録が1件もない貸し借り(自動記録を始める前のもの)は、返済分も貸した日付で作る。
+export function planLoanSync(loans, linked, cats, nameOf) {
+  const byLoan = new Map();
+  for (const t of linked) {
+    if (!byLoan.has(t.loan_id)) byLoan.set(t.loan_id, []);
+    byLoan.get(t.loan_id).push(t);
+  }
+  const inserts = [];
+  const updates = [];
+  const deletes = [];
+  const loanIds = new Set(loans.map((l) => l.id));
+  for (const [loanId, rows] of byLoan) if (!loanIds.has(loanId)) deletes.push(...rows.map((t) => t.id));
+
+  for (const loan of loans) {
+    const rows = byLoan.get(loan.id) || [];
+    const want = loanBookings(loan, cats, nameOf);
+    if (!rows.length && loan.repaid > 0) inserts.push(...repaymentBookings(loan, loan.repaid, loan.date, cats, nameOf));
+    // 返済がまだなら、つながった記録はすべて「貸したときの記録」
+    const candidates = loan.repaid > 0 && isFamilyLoan(loan) ? rows.filter((t) => !isRepaymentRow(loan, t)) : rows.slice();
+    for (const w of want) {
+      const i = candidates.findIndex((t) => t.kind === w.kind && t.member_id === w.member_id);
+      if (i < 0) { inserts.push(w); continue; }
+      const [t] = candidates.splice(i, 1);
+      const fields = {};
+      for (const k of ['date', 'amount', 'category_id', 'memo', 'shared']) if (t[k] !== w[k]) fields[k] = w[k];
+      if (Object.keys(fields).length) updates.push({ id: t.id, fields });
+    }
+    deletes.push(...candidates.map((t) => t.id));
+  }
+  return { inserts, updates, deletes };
+}
+
+// 精算で渡したお金を、家族どうしの貸し借り(to が貸して from が借りた分)の返済に古い順に当てる。
+//  ids: 精算対象メンバー。戻り値: { items: [{loan, amount}], loanTotal, rest(残りは立て替えの精算) }
+export function allocateSettlementToLoans(loans, from, to, amount, ids) {
+  const owed = loans
+    .filter((l) => isMemberLoan(l, ids) && l.amount - l.repaid > 0)
+    .filter((l) => { const { lender, borrower } = loanParties(l); return lender.member_id === to && borrower.member_id === from; })
+    .sort((a, b) => a.date.localeCompare(b.date) || String(a.created_at).localeCompare(String(b.created_at)));
+  const items = [];
+  let left = amount;
+  for (const l of owed) {
+    if (left <= 0) break;
+    const pay = Math.min(left, l.amount - l.repaid);
+    items.push({ loan: l, amount: pay });
+    left -= pay;
+  }
+  return { items, loanTotal: amount - left, rest: left };
 }
 
 // ───────── 貯金目標 ─────────

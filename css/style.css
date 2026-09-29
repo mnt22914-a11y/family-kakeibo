@@ -518,6 +518,7 @@ form:not([data-repeat="month"]) .only-month-mode { display: none !important; }
 .loan-item { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 4px 0; text-align: left; }
 .plan-rows .tx { gap: 10px; }
 form[data-cp="member"] .only-other { display: none !important; }
+form[data-cp="other"] .only-member { display: none !important; }
 
 /* かんたん入力 */
 #app.quick-mode { padding-bottom: calc(env(safe-area-inset-bottom) + 72px); }

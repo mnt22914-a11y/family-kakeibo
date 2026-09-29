@@ -106,6 +106,10 @@ create table loans (
   created_at timestamptz not null default now()
 );
 
+-- 家族どうしの貸し借りから自動で作った収支の記録。貸し借りを消すと一緒に消える
+alter table transactions add column loan_id uuid references loans on delete cascade;
+create index transactions_loan on transactions (loan_id) where loan_id is not null;
+
 -- みんなで一緒の貯金目標と、その入金
 create table goals (
   id uuid primary key default gen_random_uuid(),

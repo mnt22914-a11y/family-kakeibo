@@ -1,7 +1,7 @@
 // 実行: node --test tests/logic.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addMonths, recurringDate, dueRecurring, computeSettlement, summarize, budgetStatus, toCsv, yen, recordingStatus, quickPresets, scheduleForMonth, occursIn, summarizeLoans, goalProgress, calcEvaluate, hasOperator } from '../js/logic.js';
+import { addMonths, recurringDate, dueRecurring, computeSettlement, summarize, budgetStatus, toCsv, yen, recordingStatus, quickPresets, scheduleForMonth, occursIn, summarizeLoans, goalProgress, calcEvaluate, hasOperator, loanBookings, repaymentBookings, planLoanSync, allocateSettlementToLoans } from '../js/logic.js';
 
 test('月の足し引きは年をまたげる', () => {
   assert.equal(addMonths('2026-01', -1), '2025-12');
@@ -218,4 +218,105 @@ test('電卓: 四則と優先順位、全角、区切り記号', () => {
   assert.equal(calcEvaluate(''), 0);
   assert.equal(hasOperator('1200'), false);
   assert.equal(hasOperator('1200+1'), true);
+});
+
+// ───────── 家族どうしの貸し借りの自動記録 ─────────
+const cats = { expense: 'ce', income: 'ci' };
+const names = { papa: 'パパ', mama: 'ママ' };
+const nameOf = (id) => names[id];
+const famLoan = (o) => loan({ id: 'L1', counterparty_member_id: 'mama', counterparty_name: '', amount: 5000, ...o });
+const applyPlan = (rows, plan) => {
+  let out = rows.filter((t) => !plan.deletes.includes(t.id)).map((t) => {
+    const u = plan.updates.find((x) => x.id === t.id);
+    return u ? { ...t, ...u.fields } : t;
+  });
+  out = out.concat(plan.inserts.map((t, i) => ({ ...t, id: `new${rows.length}-${i}` })));
+  return out;
+};
+
+test('貸し借り記録: 家族どうしなら貸した人の支出と借りた人の収入を作る', () => {
+  const rows = loanBookings(famLoan({ memo: 'ランチ' }), cats, nameOf);
+  assert.deepEqual(rows.map((r) => [r.kind, r.member_id, r.amount, r.category_id, r.memo, r.shared, r.loan_id]), [
+    ['expense', 'papa', 5000, 'ce', 'ママに貸した・ランチ', false, 'L1'],
+    ['income', 'mama', 5000, 'ci', 'パパから借りた・ランチ', false, 'L1'],
+  ]);
+  // 借りた向き
+  const b = loanBookings(famLoan({ direction: 'borrowed' }), cats, nameOf);
+  assert.deepEqual(b.map((r) => [r.kind, r.member_id]), [['expense', 'mama'], ['income', 'papa']]);
+  // 家族以外とは作らない
+  assert.deepEqual(loanBookings(loan(), cats, nameOf), []);
+});
+
+test('貸し借り記録: 返済は逆向き', () => {
+  const rows = repaymentBookings(famLoan(), 2000, '2026-09-20', cats, nameOf);
+  assert.deepEqual(rows.map((r) => [r.kind, r.member_id, r.amount, r.date, r.memo]), [
+    ['expense', 'mama', 2000, '2026-09-20', 'パパに返した'],
+    ['income', 'papa', 2000, '2026-09-20', 'ママから返ってきた'],
+  ]);
+});
+
+test('貸し借り記録: 同期は足りない分を作り、2回目は何もしない', () => {
+  const loans = [famLoan()];
+  const first = planLoanSync(loans, [], cats, nameOf);
+  assert.equal(first.inserts.length, 2);
+  const rows = applyPlan([], first);
+  const again = planLoanSync(loans, rows, cats, nameOf);
+  assert.deepEqual(again, { inserts: [], updates: [], deletes: [] });
+});
+
+test('貸し借り記録: 金額・日付を直すと記録も直り、返済の記録はそのまま', () => {
+  let rows = applyPlan([], planLoanSync([famLoan()], [], cats, nameOf));
+  rows = rows.concat(repaymentBookings(famLoan(), 1000, '2026-09-10', cats, nameOf).map((t, i) => ({ ...t, id: `r${i}` })));
+  const edited = famLoan({ amount: 8000, date: '2026-09-02', repaid: 1000 });
+  const plan = planLoanSync([edited], rows, cats, nameOf);
+  assert.equal(plan.inserts.length, 0);
+  assert.equal(plan.deletes.length, 0);
+  assert.equal(plan.updates.length, 2);
+  const after = applyPlan(rows, plan);
+  assert.deepEqual(after.filter((t) => t.id.startsWith('r')).map((t) => t.amount), [1000, 1000]);
+  assert.deepEqual(after.filter((t) => !t.id.startsWith('r')).map((t) => [t.amount, t.date]), [[8000, '2026-09-02'], [8000, '2026-09-02']]);
+});
+
+test('貸し借り記録: 向きを変えると作り直し、家族以外に変えると消す', () => {
+  const rows = applyPlan([], planLoanSync([famLoan()], [], cats, nameOf));
+  const flipped = applyPlan(rows, planLoanSync([famLoan({ direction: 'borrowed' })], rows, cats, nameOf));
+  assert.deepEqual(flipped.map((t) => [t.kind, t.member_id]).sort(), [['expense', 'mama'], ['income', 'papa']]);
+  const outside = planLoanSync([famLoan({ counterparty_member_id: null, counterparty_name: 'たろう' })], rows, cats, nameOf);
+  assert.equal(outside.deletes.length, 2);
+  assert.equal(outside.inserts.length, 0);
+});
+
+test('貸し借り記録: 前からある返済済みの貸し借りは、返済分も作る。重複や消えた貸し借りの記録は消す', () => {
+  const plan = planLoanSync([famLoan({ repaid: 5000 })], [], cats, nameOf);
+  assert.deepEqual(plan.inserts.map((t) => [t.kind, t.member_id, t.amount]), [
+    ['expense', 'mama', 5000], ['income', 'papa', 5000], ['expense', 'papa', 5000], ['income', 'mama', 5000],
+  ]);
+  const rows = applyPlan([], planLoanSync([famLoan()], [], cats, nameOf));
+  const dup = rows.concat(rows.map((t) => ({ ...t, id: `${t.id}-dup` })));
+  assert.equal(planLoanSync([famLoan()], dup, cats, nameOf).deletes.length, 2);
+  assert.equal(planLoanSync([], rows, cats, nameOf).deletes.length, 2);
+});
+
+test('精算で渡したお金は、貸し借りの返済に古い順に当て、残りを立て替えの精算にする', () => {
+  const ids = new Set(['papa', 'mama']);
+  const loans = [
+    famLoan({ id: 'L2', date: '2026-09-10', amount: 3000 }),
+    famLoan({ id: 'L1', date: '2026-09-01', amount: 5000, repaid: 1000 }),
+    famLoan({ id: 'L3', direction: 'borrowed', amount: 9999 }), // ママが貸した分は当てない
+    loan({ id: 'L4', amount: 7777 }), // 家族以外
+  ];
+  const a = allocateSettlementToLoans(loans, 'mama', 'papa', 10000, ids);
+  assert.deepEqual(a.items.map((x) => [x.loan.id, x.amount]), [['L1', 4000], ['L2', 3000]]);
+  assert.equal(a.loanTotal, 7000);
+  assert.equal(a.rest, 3000);
+  const small = allocateSettlementToLoans(loans, 'mama', 'papa', 2500, ids);
+  assert.deepEqual(small.items.map((x) => [x.loan.id, x.amount]), [['L1', 2500]]);
+  assert.equal(small.rest, 0);
+  // 貸し借りを返済に当てても、精算の残高は変わらない
+  const before = computeSettlement([M('papa'), M('mama')], { papa: 6000 }, [], loans);
+  const repaid = loans.map((l) => { const it = a.items.find((x) => x.loan.id === l.id); return it ? { ...l, repaid: l.repaid + it.amount } : l; });
+  const after = computeSettlement([M('papa'), M('mama')], { papa: 6000 }, [{ from_member: 'mama', to_member: 'papa', amount: a.rest }], repaid);
+  const viaSettlement = computeSettlement([M('papa'), M('mama')], { papa: 6000 }, [{ from_member: 'mama', to_member: 'papa', amount: 10000 }], loans);
+  assert.deepEqual(after.balances.map((b) => b.balance), viaSettlement.balances.map((b) => b.balance));
+  assert.notDeepEqual(before.balances.map((b) => b.balance), after.balances.map((b) => b.balance));
 });

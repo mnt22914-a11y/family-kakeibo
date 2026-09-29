@@ -120,6 +120,17 @@ export async function createSupabaseBackend(url, anonKey) {
       return out;
     },
 
+    // 貸し借りから自動で作った取引(期間を問わずすべて)
+    async linkedTransactions() {
+      const out = [];
+      for (let offset = 0; ; offset += PAGE) {
+        const rows = check(await sb.from('transactions').select('*').eq('household_id', household.id).not('loan_id', 'is', null).order('id').range(offset, offset + PAGE - 1));
+        out.push(...rows);
+        if (rows.length < PAGE) break;
+      }
+      return out;
+    },
+
     async save(table, row) {
       const payload = { ...row, household_id: household.id };
       return check(await sb.from(table).upsert(payload).select().single());
